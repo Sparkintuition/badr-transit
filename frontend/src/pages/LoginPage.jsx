@@ -114,7 +114,7 @@ export default function LoginPage() {
           <div className="flex border-b border-[#333333]">
             {[
               { id: 'password', label: 'Personnel administratif' },
-              { id: 'pin', label: 'Agent logistique' },
+              { id: 'pin', label: 'Déclarant' },
             ].map((t) => (
               <button
                 key={t.id}

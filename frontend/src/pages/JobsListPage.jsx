@@ -23,6 +23,11 @@ const STATUS_OPTIONS = [
   { value: 'cancelled', label: 'Annulé' },
 ];
 
+// 'mine' | 'unassigned' | 'all'
+function getDefaultAssignmentFilter(role) {
+  return role === 'logistics' ? 'mine' : 'all';
+}
+
 export default function JobsListPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -39,28 +44,20 @@ export default function JobsListPage() {
   const [typeFilter, setTypeFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [clientFilter, setClientFilter] = useState('');
-  const [commisFilter, setCommisFilter] = useState(isLogistics ? String(user.id) : '');
+  const [assignmentFilter, setAssignmentFilter] = useState(getDefaultAssignmentFilter(user?.role));
   const [includeArchived, setIncludeArchived] = useState(false);
-  const [viewAll, setViewAll] = useState(false); // logistics: toggle to see all
 
   const [clients, setClients] = useState([]);
-  const [logisticsUsers, setLogisticsUsers] = useState([]);
   const [createModal, setCreateModal] = useState(false);
 
   useEffect(() => {
     api.get('/clients?include_inactive=0').then((r) => setClients(r.data)).catch(() => {});
-    api.get('/auth/logistics-users').then((r) => setLogisticsUsers(r.data)).catch(() => {});
   }, []);
 
   useEffect(() => {
     const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 300);
     return () => clearTimeout(t);
   }, [search]);
-
-  // Reset commis filter when logistics user toggles viewAll
-  useEffect(() => {
-    if (isLogistics) setCommisFilter(viewAll ? '' : String(user.id));
-  }, [viewAll, isLogistics, user?.id]);
 
   const loadJobs = useCallback(() => {
     setLoading(true);
@@ -69,18 +66,32 @@ export default function JobsListPage() {
     if (typeFilter) params.set('type', typeFilter);
     if (statusFilter) params.set('status', statusFilter);
     if (clientFilter) params.set('client_id', clientFilter);
-    if (commisFilter) params.set('commis_user_id', commisFilter);
     if (includeArchived) params.set('include_archived', '1');
+
+    if (assignmentFilter === 'mine') {
+      params.set('declarant_user_id', String(user.id));
+    } else if (assignmentFilter === 'unassigned') {
+      params.set('unassigned', '1');
+    }
+    // 'all' → no extra filter
 
     api.get(`/jobs?${params}`)
       .then((r) => { setJobs(r.data.items); setTotal(r.data.total); })
       .catch(() => toast.error('Impossible de charger les dossiers.'))
       .finally(() => setLoading(false));
-  }, [page, debouncedSearch, typeFilter, statusFilter, clientFilter, commisFilter, includeArchived]);
+  }, [page, debouncedSearch, typeFilter, statusFilter, clientFilter, assignmentFilter, includeArchived, user?.id]);
 
   useEffect(() => { loadJobs(); }, [loadJobs]);
 
+  const setAssignment = (v) => { setAssignmentFilter(v); setPage(1); };
+
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  const assignmentPills = [
+    { value: 'mine', label: 'Mes dossiers' },
+    { value: 'unassigned', label: '⚠ Non réclamés' },
+    { value: 'all', label: 'Tous' },
+  ];
 
   return (
     <div>
@@ -122,6 +133,22 @@ export default function JobsListPage() {
         </div>
 
         <div className="flex flex-wrap gap-3 items-center">
+          {/* Assignment pills (visible to all roles) */}
+          <div className="flex gap-1">
+            {assignmentPills.map((p) => (
+              <button key={p.value} onClick={() => setAssignment(p.value)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+                  assignmentFilter === p.value
+                    ? p.value === 'unassigned'
+                      ? 'bg-amber-600 border-amber-600 text-white'
+                      : 'bg-[#1E3A8A] border-[#1E3A8A] text-white'
+                    : 'border-[#333333] text-zinc-300 hover:border-[#555555]'
+                }`}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+
           {/* Status */}
           <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
             className={`${inputClass} w-44`}>
@@ -135,30 +162,12 @@ export default function JobsListPage() {
             {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
 
-          {/* Commis (admin/accountant only) */}
-          {!isLogistics && (
-            <select value={commisFilter} onChange={(e) => { setCommisFilter(e.target.value); setPage(1); }}
-              className={`${inputClass} w-44`}>
-              <option value="">Tous les commis</option>
-              {logisticsUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-            </select>
-          )}
-
           <label className="flex items-center gap-2 cursor-pointer text-sm text-zinc-300 select-none">
             <input type="checkbox" checked={includeArchived}
               onChange={(e) => { setIncludeArchived(e.target.checked); setPage(1); }}
               className="rounded border-[#333333] bg-[#2A2A2A] focus:ring-[#3B5BDB]" />
             Inclure les archivés
           </label>
-
-          {/* Logistics: toggle view all */}
-          {isLogistics && (
-            <label className="flex items-center gap-2 cursor-pointer text-sm text-zinc-300 select-none">
-              <input type="checkbox" checked={viewAll} onChange={(e) => setViewAll(e.target.checked)}
-                className="rounded border-[#333333] bg-[#2A2A2A] focus:ring-[#3B5BDB]" />
-              Tous les dossiers
-            </label>
-          )}
         </div>
       </div>
 
@@ -167,22 +176,24 @@ export default function JobsListPage() {
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[#333333] bg-[#2A2A2A]">
-              {['N° Dossier', 'Type', 'Client', 'Commis', 'DUM(s)', 'Progression', 'Statut', 'Créé le'].map((h) => (
+              {['N° Dossier', 'Type', 'Client', 'Déclarant', 'Commis', 'DUM(s)', 'Progression', 'Statut', 'Créé le'].map((h) => (
                 <th key={h} className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide whitespace-nowrap">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-[#333333]">
             {loading && (
-              <tr><td colSpan={8} className="px-4 py-10 text-center text-[#A1A1AA] text-sm">Chargement…</td></tr>
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-[#A1A1AA] text-sm">Chargement…</td></tr>
             )}
             {!loading && jobs.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-4 py-16 text-center">
+                <td colSpan={9} className="px-4 py-16 text-center">
                   <p className="text-[#A1A1AA] text-sm">
                     {debouncedSearch || typeFilter || statusFilter || clientFilter
                       ? 'Aucun dossier ne correspond à votre recherche.'
-                      : 'Aucun dossier. Créez votre premier dossier import ou export.'}
+                      : assignmentFilter === 'unassigned'
+                        ? 'Aucun dossier non réclamé.'
+                        : 'Aucun dossier. Créez votre premier dossier import ou export.'}
                   </p>
                 </td>
               </tr>
@@ -205,9 +216,18 @@ export default function JobsListPage() {
                   </span>
                 </td>
                 {/* Client */}
-                <td className="px-4 py-3 text-zinc-300 max-w-[160px] truncate">{job.client?.name || '—'}</td>
+                <td className="px-4 py-3 text-zinc-300 max-w-[140px] truncate">{job.client?.name || '—'}</td>
+                {/* Déclarant */}
+                <td className="px-4 py-3 text-xs">
+                  {job.declarant
+                    ? <span className="text-zinc-300">{job.declarant.name}</span>
+                    : <span className="text-amber-400 font-medium">⚠ Non réclamé</span>
+                  }
+                </td>
                 {/* Commis */}
-                <td className="px-4 py-3 text-[#A1A1AA] text-xs">{job.commis_user?.name || '—'}</td>
+                <td className="px-4 py-3 text-[#A1A1AA] text-xs">
+                  {job.commis_name || job.commis_user?.name || '—'}
+                </td>
                 {/* DUM(s) */}
                 <td className="px-4 py-3">
                   {job.dums.length === 0

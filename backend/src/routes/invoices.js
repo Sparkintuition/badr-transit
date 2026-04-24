@@ -220,11 +220,60 @@ router.post('/preview', requireRole('admin', 'accountant'), (req, res) => {
   });
 });
 
+// ─── GET /aged-receivables ─────────────────────────────────────────────────────
+router.get('/aged-receivables', requireRole('admin', 'accountant'), (req, res) => {
+  const today = todayStr();
+
+  const rows = db.prepare(`
+    SELECT i.id, i.reste_a_payer_cents, i.due_date, i.client_id, c.name AS client_name
+    FROM invoices i JOIN clients c ON c.id = i.client_id
+    WHERE i.status = 'sent'
+  `).all();
+
+  const buckets = {
+    current:  { count: 0, total_cents: 0 },
+    '1_30':   { count: 0, total_cents: 0 },
+    '31_60':  { count: 0, total_cents: 0 },
+    '61_90':  { count: 0, total_cents: 0 },
+    '90_plus':{ count: 0, total_cents: 0 },
+  };
+  const byClient = {};
+  let total_outstanding_cents = 0;
+  let total_overdue_cents = 0;
+
+  for (const row of rows) {
+    const days = row.due_date < today ? daysOverdue(row.due_date) : 0;
+    const amt = row.reste_a_payer_cents;
+    total_outstanding_cents += amt;
+
+    const bucket = days === 0 ? 'current' : days <= 30 ? '1_30' : days <= 60 ? '31_60' : days <= 90 ? '61_90' : '90_plus';
+    buckets[bucket].count++;
+    buckets[bucket].total_cents += amt;
+    if (days > 0) total_overdue_cents += amt;
+
+    if (!byClient[row.client_id]) {
+      byClient[row.client_id] = {
+        client_id: row.client_id, client_name: row.client_name,
+        current_cents: 0, '1_30_cents': 0, '31_60_cents': 0, '61_90_cents': 0, '90_plus_cents': 0,
+        total_cents: 0,
+      };
+    }
+    const cKey = bucket === 'current' ? 'current_cents' : `${bucket}_cents`;
+    byClient[row.client_id][cKey] += amt;
+    byClient[row.client_id].total_cents += amt;
+  }
+
+  const by_client = Object.values(byClient).sort((a, b) => b.total_cents - a.total_cents).slice(0, 20);
+  res.json({ buckets, total_outstanding_cents, total_overdue_cents, by_client });
+});
+
 // ─── GET / ─────────────────────────────────────────────────────────────────────
 router.get('/', (req, res) => {
   const {
     status, client_id, job_id, search = '',
     date_from, date_to, overdue_only,
+    payment_date_from, payment_date_to,
+    sort_by,
     page = '1', page_size = '50',
   } = req.query;
 
@@ -264,6 +313,9 @@ router.get('/', (req, res) => {
     params.push(today);
   }
 
+  if (payment_date_from) { where.push('i.payment_date >= ?'); params.push(payment_date_from); }
+  if (payment_date_to)   { where.push('i.payment_date <= ?'); params.push(payment_date_to); }
+
   if (search.trim()) {
     const term = `%${search.trim()}%`;
     where.push('(i.facture_number LIKE ? OR j.dossier_number LIKE ? OR c.name LIKE ?)');
@@ -281,11 +333,14 @@ router.get('/', (req, res) => {
   const countRow = db.prepare(`SELECT COUNT(*) AS n ${baseQuery}`).get(...params);
   const total = countRow.n;
 
+  const sortMap = { due_date: 'i.due_date ASC', client: 'c.name ASC, i.created_at DESC', overdue: 'i.due_date ASC' };
+  const orderBy = sortMap[sort_by] || 'i.created_at DESC';
+
   const rows = db.prepare(`
     SELECT i.*, j.dossier_number, j.type AS job_type,
            c.name AS client_name, c.id AS client_id
     ${baseQuery}
-    ORDER BY i.created_at DESC
+    ORDER BY ${orderBy}
     LIMIT ? OFFSET ?
   `).all(...params, pageSize, offset);
 
@@ -532,13 +587,17 @@ router.post('/:id/mark-paid', requireRole('admin', 'accountant'), (req, res) => 
     return res.status(409).json({ error: 'La facture doit être en statut "Envoyée" ou "En retard" pour être marquée payée.' });
   }
 
-  db.transaction(() => {
+  db.exec('BEGIN');
+  try {
     db.prepare("UPDATE invoices SET status = 'paid', payment_date = ?, payment_method = ? WHERE id = ?")
       .run(payment_date, payment_method, inv.id);
-
     db.prepare("UPDATE disbursements SET status = 'reimbursed' WHERE invoice_id = ?").run(inv.id);
     db.prepare("UPDATE jobs SET status = 'paid' WHERE id = ?").run(inv.job_id);
-  })();
+    db.exec('COMMIT');
+  } catch (txErr) {
+    db.exec('ROLLBACK');
+    throw txErr;
+  }
 
   logAudit(db, {
     user_id: req.user.id, action: 'mark_paid', entity_type: 'invoice',
@@ -559,19 +618,18 @@ router.post('/:id/cancel', requireRole('admin'), (req, res) => {
   if (inv.status === 'paid') return res.status(409).json({ error: 'Une facture payée ne peut pas être annulée.' });
   if (inv.status === 'cancelled') return res.status(409).json({ error: 'Facture déjà annulée.' });
 
-  db.transaction(() => {
+  db.exec('BEGIN');
+  try {
     db.prepare("UPDATE invoices SET status = 'cancelled', cancelled_reason = ? WHERE id = ?")
       .run(reason.trim(), inv.id);
-
-    // Revert disbursements
     db.prepare("UPDATE disbursements SET status = 'signed', invoice_id = NULL WHERE invoice_id = ?").run(inv.id);
-
-    // Revert service charges
     db.prepare('UPDATE service_charges SET invoice_id = NULL WHERE invoice_id = ?').run(inv.id);
-
-    // Revert job
     db.prepare("UPDATE jobs SET status = 'released' WHERE id = ? AND status = 'invoiced'").run(inv.job_id);
-  })();
+    db.exec('COMMIT');
+  } catch (txErr) {
+    db.exec('ROLLBACK');
+    throw txErr;
+  }
 
   logAudit(db, {
     user_id: req.user.id, action: 'cancel', entity_type: 'invoice',

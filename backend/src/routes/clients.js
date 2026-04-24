@@ -8,6 +8,12 @@ const { nullableStr, zodFieldErrors } = require('../utils/validators');
 const router = Router();
 router.use(requireAuth);
 
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function daysOverdue(due_date) {
+  const diff = Date.now() - new Date(due_date + 'T00:00:00').getTime();
+  return Math.max(0, Math.floor(diff / 86400000));
+}
+
 // ─── Validation schema ────────────────────────────────────────────────────────
 
 const clientBodySchema = z.object({
@@ -36,9 +42,12 @@ const CLIENT_SELECT = `
   SELECT
     c.id, c.name, c.ice, c.address, c.contact_person, c.email, c.phone,
     c.payment_deadline_days, c.active, c.created_at,
-    COALESCE((SELECT COUNT(*) FROM jobs    WHERE client_id = c.id), 0) AS jobs_count,
-    COALESCE((SELECT COUNT(*) FROM invoices WHERE client_id = c.id AND status != 'paid'), 0) AS unpaid_invoices_count,
-    COALESCE((SELECT SUM(reste_a_payer_cents) FROM invoices WHERE client_id = c.id AND status != 'paid'), 0) AS total_unpaid_cents
+    COALESCE((SELECT COUNT(*) FROM jobs WHERE client_id = c.id), 0) AS jobs_count,
+    COALESCE((SELECT COUNT(*) FROM invoices WHERE client_id = c.id AND status NOT IN ('paid','cancelled')), 0) AS unpaid_invoices_count,
+    COALESCE((SELECT SUM(reste_a_payer_cents) FROM invoices WHERE client_id = c.id AND status NOT IN ('paid','cancelled')), 0) AS total_unpaid_cents,
+    COALESCE((SELECT SUM(total_ttc_cents) FROM invoices WHERE client_id = c.id AND status != 'cancelled'), 0) AS total_invoiced_cents,
+    COALESCE((SELECT SUM(reste_a_payer_cents) FROM invoices WHERE client_id = c.id AND status = 'sent' AND due_date < DATE('now')), 0) AS total_overdue_cents,
+    COALESCE((SELECT COUNT(*) FROM invoices WHERE client_id = c.id AND status = 'sent' AND due_date < DATE('now')), 0) AS count_overdue
   FROM clients c
 `;
 
@@ -179,6 +188,100 @@ router.delete('/:id', requireRole('admin'), (req, res) => {
   logAudit(db, { user_id: req.user.id, action: 'delete', entity_type: 'client', entity_id: id, old_value: client });
 
   res.json({ deleted: true });
+});
+
+// ─── GET /:id/payment-summary ─────────────────────────────────────────────────
+router.get('/:id/payment-summary', requireRole('admin', 'accountant'), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const exists = db.prepare('SELECT id FROM clients WHERE id = ?').get(id);
+  if (!exists) return res.status(404).json({ error: 'Client introuvable' });
+
+  const today = todayStr();
+
+  const inv = db.prepare(`
+    SELECT
+      COUNT(*) AS total_invoices,
+      SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS count_paid,
+      SUM(CASE WHEN status NOT IN ('paid','cancelled') THEN 1 ELSE 0 END) AS count_unpaid,
+      COALESCE(SUM(CASE WHEN status != 'cancelled' THEN total_ttc_cents ELSE 0 END), 0) AS total_invoiced_cents,
+      COALESCE(SUM(CASE WHEN status = 'paid' THEN total_ttc_cents ELSE 0 END), 0) AS total_paid_cents,
+      COALESCE(SUM(CASE WHEN status NOT IN ('paid','cancelled') THEN reste_a_payer_cents ELSE 0 END), 0) AS total_outstanding_cents,
+      COALESCE(SUM(CASE WHEN status = 'sent' AND due_date < ? THEN reste_a_payer_cents ELSE 0 END), 0) AS total_overdue_cents,
+      COUNT(CASE WHEN status = 'sent' AND due_date < ? THEN 1 END) AS count_overdue,
+      MAX(issue_date) AS last_invoice_date,
+      MAX(payment_date) AS last_payment_date,
+      AVG(CASE WHEN status = 'paid' AND payment_date IS NOT NULL
+          THEN julianday(payment_date) - julianday(issue_date) END) AS avg_days_to_pay
+    FROM invoices WHERE client_id = ?
+  `).get(today, today, id);
+
+  const job = db.prepare(`
+    SELECT
+      COUNT(*) AS total_jobs,
+      SUM(CASE WHEN status IN ('open','released') THEN 1 ELSE 0 END) AS open_jobs,
+      SUM(CASE WHEN status = 'invoiced' THEN 1 ELSE 0 END) AS invoiced_jobs,
+      SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS paid_jobs
+    FROM jobs WHERE client_id = ?
+  `).get(id);
+
+  res.json({
+    total_jobs: job.total_jobs || 0,
+    open_jobs: job.open_jobs || 0,
+    invoiced_jobs: job.invoiced_jobs || 0,
+    paid_jobs: job.paid_jobs || 0,
+    total_invoiced_cents: inv.total_invoiced_cents || 0,
+    total_paid_cents: inv.total_paid_cents || 0,
+    total_outstanding_cents: inv.total_outstanding_cents || 0,
+    total_overdue_cents: inv.total_overdue_cents || 0,
+    count_overdue: inv.count_overdue || 0,
+    avg_days_to_pay: inv.avg_days_to_pay != null ? Math.round(inv.avg_days_to_pay) : null,
+    last_invoice_date: inv.last_invoice_date || null,
+    last_payment_date: inv.last_payment_date || null,
+  });
+});
+
+// ─── GET /:id/statement ───────────────────────────────────────────────────────
+router.get('/:id/statement', requireRole('admin', 'accountant'), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const client = db.prepare(`${CLIENT_SELECT} WHERE c.id = ?`).get(id);
+  if (!client) return res.status(404).json({ error: 'Client introuvable' });
+
+  const today = todayStr();
+  const fromDate = req.query.from || '2000-01-01';
+  const toDate   = req.query.to   || today;
+
+  const rows = db.prepare(`
+    SELECT i.id, i.facture_number, i.issue_date, i.due_date,
+           i.total_ttc_cents, i.reste_a_payer_cents, i.status,
+           i.payment_date, i.payment_method
+    FROM invoices i
+    WHERE i.client_id = ? AND i.issue_date >= ? AND i.issue_date <= ?
+    ORDER BY i.issue_date DESC
+  `).all(id, fromDate, toDate);
+
+  const invoices = rows.map((r) => {
+    const isOv = r.status === 'sent' && r.due_date < today;
+    return {
+      ...r,
+      _db_status: r.status,
+      status: isOv ? 'overdue' : r.status,
+      is_overdue: isOv,
+      days_overdue: isOv ? daysOverdue(r.due_date) : 0,
+    };
+  });
+
+  const summary = {
+    count_invoices: invoices.length,
+    count_paid: invoices.filter((i) => i._db_status === 'paid').length,
+    count_unpaid: invoices.filter((i) => !['paid', 'cancelled'].includes(i._db_status)).length,
+    count_overdue: invoices.filter((i) => i.is_overdue).length,
+    total_invoiced_cents: invoices.filter((i) => i._db_status !== 'cancelled').reduce((s, i) => s + i.total_ttc_cents, 0),
+    total_paid_cents: invoices.filter((i) => i._db_status === 'paid').reduce((s, i) => s + i.total_ttc_cents, 0),
+    total_outstanding_cents: invoices.filter((i) => !['paid', 'cancelled'].includes(i._db_status)).reduce((s, i) => s + i.reste_a_payer_cents, 0),
+    total_overdue_cents: invoices.filter((i) => i.is_overdue).reduce((s, i) => s + i.reste_a_payer_cents, 0),
+  };
+
+  res.json({ client, period: { from: fromDate, to: toDate }, invoices, summary });
 });
 
 module.exports = router;

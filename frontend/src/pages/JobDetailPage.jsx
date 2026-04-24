@@ -103,6 +103,219 @@ function StatusChangeModal({ jobId, targetStatus, onClose, onDone }) {
   );
 }
 
+// ─── TransferDeclarantModal ───────────────────────────────────────────────────
+
+function TransferDeclarantModal({ jobId, currentDeclarantId, onClose, onDone }) {
+  const [logisticsUsers, setLogisticsUsers] = useState([]);
+  const [toUserId, setToUserId] = useState('');
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.get('/auth/logistics-users').then((r) => {
+      const others = r.data.filter((u) => u.id !== currentDeclarantId);
+      setLogisticsUsers(others);
+      if (others.length > 0) setToUserId(String(others[0].id));
+    }).catch(() => {});
+  }, [currentDeclarantId]);
+
+  const handleConfirm = async () => {
+    if (!toUserId) { setError('Veuillez sélectionner un déclarant.'); return; }
+    setSaving(true);
+    try {
+      await api.post(`/jobs/${jobId}/transfer-declarant`, {
+        to_user_id: parseInt(toUserId, 10),
+        note: note.trim() || null,
+      });
+      toast.success('Dossier transféré.');
+      onDone();
+    } catch (err) {
+      setError(err.response?.data?.error || err.response?.data?.errors?.to_user_id || 'Erreur.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-[#242424] border border-[#333333] rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <h2 className="text-base font-semibold text-[#FAFAFA] mb-4">Transférer le dossier</h2>
+        <div className="space-y-3 mb-4">
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">Transférer à <span className="text-red-400">*</span></label>
+            <select value={toUserId} onChange={(e) => setToUserId(e.target.value)} className={inputClass}>
+              <option value="">— Sélectionner —</option>
+              {logisticsUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">Note (optionnel)</label>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2}
+              className={`${inputClass} resize-none`} placeholder="Raison du transfert…" />
+          </div>
+          {error && <p className="text-xs text-red-400">{error}</p>}
+        </div>
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 border border-[#333333] text-sm text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">Annuler</button>
+          <button onClick={handleConfirm} disabled={saving}
+            className="flex-1 py-2 bg-[#1E3A8A] hover:bg-[#1E40AF] text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50">
+            {saving ? '…' : 'Confirmer'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ForceClaimModal ──────────────────────────────────────────────────────────
+
+function ForceClaimModal({ jobId, currentDeclarantName, onClose, onDone }) {
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleConfirm = async () => {
+    if (note.trim().length < 5) { setError('Le motif doit contenir au moins 5 caractères.'); return; }
+    setSaving(true);
+    try {
+      await api.post(`/jobs/${jobId}/force-claim-declarant`, { note: note.trim() });
+      toast.success('Dossier réclamé.');
+      onDone();
+    } catch (err) {
+      setError(err.response?.data?.errors?.note || err.response?.data?.error || 'Erreur.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-[#242424] border border-[#333333] rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <h2 className="text-base font-semibold text-[#FAFAFA] mb-2">Réclamer ce dossier</h2>
+        <div className="mb-3 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-800/50 text-xs text-amber-300">
+          Déclarant actuel : <span className="font-semibold">{currentDeclarantName}</span>. Le changement sera tracé.
+        </div>
+        <div className="space-y-3 mb-4">
+          <div>
+            <label className="block text-sm font-medium text-zinc-300 mb-1">Motif <span className="text-red-400">*</span></label>
+            <textarea value={note} onChange={(e) => { setNote(e.target.value); setError(''); }} rows={3}
+              className={`${inputClass} resize-none`}
+              placeholder="Ex : Adil en pause déjeuner — mise à jour urgente" />
+            {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 border border-[#333333] text-sm text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">Annuler</button>
+          <button onClick={handleConfirm} disabled={saving}
+            className="flex-1 py-2 bg-amber-600 hover:bg-amber-700 text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50">
+            {saving ? '…' : 'Réclamer'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ReleaseDeclarantModal ────────────────────────────────────────────────────
+
+function ReleaseDeclarantModal({ jobId, onClose, onDone }) {
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleConfirm = async () => {
+    if (note.trim().length < 5) { setError('Le motif doit contenir au moins 5 caractères.'); return; }
+    setSaving(true);
+    try {
+      await api.post(`/jobs/${jobId}/release-declarant`, { note: note.trim() });
+      toast.success('Dossier libéré.');
+      onDone();
+    } catch (err) {
+      setError(err.response?.data?.errors?.note || err.response?.data?.error || 'Erreur.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+      <div className="bg-[#242424] border border-[#333333] rounded-2xl shadow-xl w-full max-w-sm p-6">
+        <h2 className="text-base font-semibold text-[#FAFAFA] mb-2">Libérer ce dossier</h2>
+        <div className="mb-4 px-3 py-2 rounded-lg bg-amber-900/20 border border-amber-800/50 text-xs text-amber-300">
+          Le dossier retournera dans le pool des dossiers non réclamés. Un motif est requis.
+        </div>
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-zinc-300 mb-1">Motif (obligatoire) <span className="text-red-400">*</span></label>
+          <textarea value={note} onChange={(e) => { setNote(e.target.value); setError(''); }}
+            rows={3} className={`${inputClass} resize-none`}
+            placeholder="Ex: Fin de journée, passage à Nawal" />
+          {error && <p className="text-xs text-red-400 mt-1">{error}</p>}
+        </div>
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2 border border-[#333333] text-sm text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">Annuler</button>
+          <button onClick={handleConfirm} disabled={saving}
+            className="flex-1 py-2 bg-[#1E3A8A] hover:bg-[#1E40AF] text-sm font-medium text-white rounded-lg transition-colors disabled:opacity-50">
+            {saving ? '…' : 'Confirmer la libération'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Assignment log entry ─────────────────────────────────────────────────────
+
+function AssignmentLogEntry({ entry }) {
+  const isForceClaim = entry.is_force_claim === 1;
+  const isCreation = entry.note === 'Création du dossier';
+  const isRelease = entry.to_user_id === null && entry.from_user_id !== null;
+  const isClaim = entry.note === 'Réclamé' && entry.from_user_id === null;
+
+  let icon = '↔';
+  let colorClass = 'text-[#60A5FA]';
+  if (isForceClaim) { icon = '⚡'; colorClass = 'text-amber-400'; }
+  else if (isCreation) { icon = '✦'; colorClass = 'text-emerald-400'; }
+  else if (isRelease) { icon = '↗'; colorClass = 'text-zinc-400'; }
+  else if (isClaim) { icon = '↙'; colorClass = 'text-emerald-400'; }
+
+  let text = '';
+  if (isCreation) {
+    text = entry.to_user_name
+      ? `Créé et attribué à ${entry.to_user_name}`
+      : 'Créé sans déclarant';
+  } else if (isRelease) {
+    text = `Libéré par ${entry.changed_by_name}`;
+  } else if (isClaim) {
+    text = `Réclamé par ${entry.to_user_name}`;
+  } else if (isForceClaim) {
+    text = `Réclamé de force par ${entry.changed_by_name}${entry.from_user_name ? ` (était : ${entry.from_user_name})` : ''}`;
+  } else {
+    const from = entry.from_user_name || 'Non réclamé';
+    const to = entry.to_user_name || 'Libéré';
+    text = `Transféré : ${from} → ${to}`;
+    if (entry.changed_by_name && entry.changed_by_name !== entry.from_user_name) {
+      text += ` (par ${entry.changed_by_name})`;
+    }
+  }
+
+  return (
+    <div className="flex items-start gap-3 py-2">
+      <span className={`text-sm flex-shrink-0 ${colorClass}`}>{icon}</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm text-zinc-300">{text}</p>
+        {entry.note && !isCreation && !isClaim && (
+          <p className="text-xs text-[#A1A1AA] mt-0.5 italic">"{entry.note}"</p>
+        )}
+        <p className="text-xs text-[#555555] mt-0.5">{formatDateTime(entry.changed_at)}</p>
+      </div>
+      {isForceClaim && (
+        <span className="text-xs px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 flex-shrink-0">force</span>
+      )}
+    </div>
+  );
+}
+
 // ─── Main page ────────────────────────────────────────────────────────────────
 
 export default function JobDetailPage() {
@@ -120,6 +333,12 @@ export default function JobDetailPage() {
   const [disbFormOpen, setDisbFormOpen] = useState(false);
   const [disbDetailId, setDisbDetailId] = useState(null);
 
+  // Declarant management
+  const [transferDialog, setTransferDialog] = useState(false);
+  const [forceClaimDialog, setForceClaimDialog] = useState(false);
+  const [releaseDialog, setReleaseDialog] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+
   // DUM state
   const [dumAdding, setDumAdding] = useState(false);
   const [dumAddForm, setDumAddForm] = useState({ dum_number: '', dum_date: '' });
@@ -130,7 +349,7 @@ export default function JobDetailPage() {
   // Milestone state
   const [skippingMsId, setSkippingMsId] = useState(null);
   const [skipNote, setSkipNote] = useState('');
-  const [msSaving, setMsSaving] = useState(null); // milestone id being saved
+  const [msSaving, setMsSaving] = useState(null);
 
   // Service charge state
   const [scAdding, setScAdding] = useState(false);
@@ -166,6 +385,10 @@ export default function JobDetailPage() {
   if (!job) {
     return <div className="py-16 text-center text-[#A1A1AA] text-sm">Dossier introuvable.</div>;
   }
+
+  // Declarant role checks
+  const isDeclarant = user?.id === job.declarant?.id;
+  const hasDeclarant = !!job.declarant;
 
   const completedMs = job.milestones.filter((m) => m.status === 'completed').length;
   const totalMs = job.milestones.length;
@@ -263,7 +486,9 @@ export default function JobDetailPage() {
     setObsSaving(true);
     try {
       await api.put(`/jobs/${id}`, {
-        client_id: job.client.id, commis_user_id: job.commis_user?.id || null,
+        client_id: job.client.id,
+        commis_name: job.commis_name ?? null,
+        commis_user_id: job.commis_user?.id ?? null,
         inspecteur: job.inspecteur, recu_le: job.recu_le,
         expediteur_exportateur: job.expediteur_exportateur, nombre_colis_tc: job.nombre_colis_tc,
         poids_brut_kg: job.poids_brut_kg, nature_marchandise: job.nature_marchandise,
@@ -275,6 +500,18 @@ export default function JobDetailPage() {
     } catch { toast.error('Erreur.'); }
     finally { setObsSaving(false); }
   };
+
+  // ── Declarant actions ─────────────────────────────────────────────────────
+
+  const handleClaimDeclarant = async () => {
+    try {
+      await api.post(`/jobs/${id}/claim-declarant`);
+      toast.success('Dossier réclamé.');
+      loadJob();
+    } catch (err) { toast.error(err.response?.data?.error || 'Erreur.'); }
+  };
+
+  const handleReleaseDeclarant = () => setReleaseDialog(true);
 
   // ── Archive / Unarchive ───────────────────────────────────────────────────
 
@@ -300,6 +537,10 @@ export default function JobDetailPage() {
 
   const disbTotal = job.disbursements.reduce((s, d) => s + d.amount_cents, 0);
   const disbUnbilled = job.disbursements.filter((d) => !d.invoice_id).reduce((s, d) => s + d.amount_cents, 0);
+
+  const assignmentsLog = job.assignments_log || [];
+  const declarantLog = assignmentsLog.filter((e) => e.field === 'declarant');
+  const displayedLog = historyExpanded ? declarantLog : declarantLog.slice(0, 3);
 
   return (
     <div className="space-y-5">
@@ -327,6 +568,48 @@ export default function JobDetailPage() {
 
         {/* Action buttons */}
         <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => window.open(`/api/jobs/${job.id}/sheet-pdf`, '_blank')}
+            className="px-3 py-1.5 text-sm border border-[#333333] text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors flex items-center gap-1.5"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.75 19.5m10.56-5.671L17.25 19.5m0 0l.345-5.672M17.25 19.5H6.75m10.5 0a48.11 48.11 0 01-10.5 0M6.75 19.5V14.25m10.5 5.25V14.25m0 0a3 3 0 00-3-3H9.75a3 3 0 00-3 3m13.5 0V9.75A2.25 2.25 0 0019.5 7.5h-15A2.25 2.25 0 002.25 9.75v4.5" />
+            </svg>
+            Imprimer fiche dossier
+          </button>
+
+          {/* Declarant management buttons */}
+          {user?.role === 'logistics' && !hasDeclarant && (
+            <button onClick={handleClaimDeclarant}
+              className="px-3 py-1.5 text-sm bg-emerald-700/50 border border-emerald-700 text-emerald-300 rounded-lg hover:bg-emerald-700/70 transition-colors">
+              Réclamer ce dossier
+            </button>
+          )}
+          {user?.role === 'logistics' && isDeclarant && (
+            <>
+              <button onClick={() => setTransferDialog(true)}
+                className="px-3 py-1.5 text-sm border border-[#333333] text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">
+                Transférer
+              </button>
+              <button onClick={handleReleaseDeclarant}
+                className="px-3 py-1.5 text-sm border border-[#444] text-zinc-400 rounded-lg hover:bg-[#2A2A2A] transition-colors">
+                Libérer
+              </button>
+            </>
+          )}
+          {user?.role === 'logistics' && hasDeclarant && !isDeclarant && (
+            <button onClick={() => setForceClaimDialog(true)}
+              className="px-3 py-1.5 text-sm border border-amber-700 text-amber-300 rounded-lg hover:bg-amber-900/20 transition-colors">
+              Réclamer de force
+            </button>
+          )}
+          {canChangeStatus && (
+            <button onClick={() => setTransferDialog(true)}
+              className="px-3 py-1.5 text-sm border border-[#333333] text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">
+              Réassigner
+            </button>
+          )}
+
           {canEdit && (
             <button onClick={() => setEditModal(true)}
               className="px-3 py-1.5 text-sm border border-[#333333] text-zinc-300 rounded-lg hover:bg-[#2A2A2A] transition-colors">
@@ -383,7 +666,26 @@ export default function JobDetailPage() {
           <InfoField label="Compagnie transport" value={job.compagnie_transport} />
           <InfoField label="Dépôt de séquence" value={formatDate(job.depot_sequence_date)} />
           <InfoField label="Inspecteur" value={job.inspecteur} />
-          <InfoField label="Agent commis" value={job.commis_user?.name} />
+          <div>
+            <dt className="text-xs text-[#A1A1AA] uppercase tracking-wide mb-0.5">Déclarant</dt>
+            <dd className="text-sm">
+              {job.declarant
+                ? <span className="text-[#FAFAFA]">{job.declarant.name}</span>
+                : <span className="text-amber-400">⚠ Non réclamé</span>
+              }
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-[#A1A1AA] uppercase tracking-wide mb-0.5">Commis</dt>
+            <dd className="text-sm text-[#FAFAFA]">
+              {job.commis_name
+                ? <span>{job.commis_name}</span>
+                : job.commis_user
+                  ? <span className="text-zinc-400">{job.commis_user.name}</span>
+                  : <span className="text-[#555555]">—</span>
+              }
+            </dd>
+          </div>
           <InfoField label="Créé le" value={formatDateTime(job.created_at)} />
         </dl>
       </div>
@@ -452,7 +754,6 @@ export default function JobDetailPage() {
             </tbody>
           </table>
         )}
-        {/* Add DUM form */}
         {dumAdding && (
           <div className="mt-3 flex gap-2 items-end flex-wrap border-t border-[#333333] pt-3">
             <div className="flex-1 min-w-32">
@@ -485,7 +786,6 @@ export default function JobDetailPage() {
           <span>Étapes / Jalons</span>
           <span className="text-xs font-normal text-[#A1A1AA]">{completedMs}/{totalMs} complétées</span>
         </div>
-        {/* Progress bar */}
         <div className="h-1.5 bg-[#333333] rounded-full overflow-hidden mb-4">
           <div className="h-full bg-[#F59E0B] rounded-full transition-all"
             style={{ width: `${totalMs > 0 ? (completedMs / totalMs) * 100 : 0}%` }} />
@@ -505,7 +805,6 @@ export default function JobDetailPage() {
                   {ms.status === 'skipped' && <p className="text-xs text-[#A1A1AA] mt-0.5">Ignoré{ms.notes ? ` — ${ms.notes}` : ''}</p>}
                   {ms.status === 'in_progress' && <p className="text-xs text-blue-400 mt-0.5">En cours</p>}
                 </div>
-                {/* Action buttons */}
                 {canEdit && (
                   <div className="flex gap-2 flex-shrink-0">
                     {ms.status !== 'completed' && (
@@ -527,7 +826,6 @@ export default function JobDetailPage() {
                   </div>
                 )}
               </div>
-              {/* Skip note form */}
               {skippingMsId === ms.id && (
                 <div className="ml-10 mt-1 mb-2 flex gap-2 items-end">
                   <input type="text" value={skipNote} onChange={(e) => setSkipNote(e.target.value)}
@@ -640,7 +938,6 @@ export default function JobDetailPage() {
               </tbody>
             </table>
           )}
-          {/* Add SC form */}
           {scAdding && !job.invoice && (
             <div className="border-t border-[#333333] pt-3 mt-3 grid grid-cols-2 gap-3">
               <div className="col-span-2">
@@ -735,12 +1032,55 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Historique du dossier */}
+      {declarantLog.length > 0 && (
+        <div className={cardClass}>
+          <div className={sectionTitleClass}>
+            <span>Historique du dossier</span>
+            {declarantLog.length > 3 && (
+              <button onClick={() => setHistoryExpanded((v) => !v)}
+                className="text-xs text-[#60A5FA] hover:underline font-normal">
+                {historyExpanded ? 'Réduire' : `Voir tout (${declarantLog.length})`}
+              </button>
+            )}
+          </div>
+          <div className="divide-y divide-[#2A2A2A]">
+            {displayedLog.map((entry) => (
+              <AssignmentLogEntry key={entry.id} entry={entry} />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Modals */}
       {editModal && (
         <JobFormModal mode="edit" job={job} onClose={() => setEditModal(false)} onSaved={() => { setEditModal(false); loadJob(); }} />
       )}
       {statusModal && (
         <StatusChangeModal jobId={id} targetStatus={statusModal} onClose={() => setStatusModal(null)} onDone={() => { setStatusModal(null); loadJob(); }} />
+      )}
+      {transferDialog && (
+        <TransferDeclarantModal
+          jobId={id}
+          currentDeclarantId={job.declarant?.id ?? null}
+          onClose={() => setTransferDialog(false)}
+          onDone={() => { setTransferDialog(false); loadJob(); }}
+        />
+      )}
+      {forceClaimDialog && (
+        <ForceClaimModal
+          jobId={id}
+          currentDeclarantName={job.declarant?.name}
+          onClose={() => setForceClaimDialog(false)}
+          onDone={() => { setForceClaimDialog(false); loadJob(); }}
+        />
+      )}
+      {releaseDialog && (
+        <ReleaseDeclarantModal
+          jobId={id}
+          onClose={() => setReleaseDialog(false)}
+          onDone={() => { setReleaseDialog(false); loadJob(); }}
+        />
       )}
       {confirm && (
         <ConfirmDialog title={confirm.title} description={confirm.description}

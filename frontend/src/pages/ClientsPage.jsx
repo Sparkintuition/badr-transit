@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { useAuth } from '../auth/AuthContext';
 import api from '../api';
@@ -397,6 +398,7 @@ export default function ClientsPage() {
               <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">Délai paiement</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">Dossiers</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">Impayés</th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">En retard</th>
               <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">Statut</th>
               {canEdit && (
                 <th className="px-4 py-3 text-left text-xs font-medium text-[#A1A1AA] uppercase tracking-wide">Actions</th>
@@ -406,7 +408,7 @@ export default function ClientsPage() {
           <tbody className="divide-y divide-[#333333]">
             {loading && (
               <tr>
-                <td colSpan={canEdit ? 7 : 6} className="px-4 py-10 text-center text-[#A1A1AA] text-sm">
+                <td colSpan={canEdit ? 8 : 7} className="px-4 py-10 text-center text-[#A1A1AA] text-sm">
                   Chargement…
                 </td>
               </tr>
@@ -414,7 +416,7 @@ export default function ClientsPage() {
 
             {!loading && isEmpty && (
               <tr>
-                <td colSpan={canEdit ? 7 : 6} className="px-4 py-16 text-center">
+                <td colSpan={canEdit ? 8 : 7} className="px-4 py-16 text-center">
                   <p className="text-[#A1A1AA] text-sm">
                     {hasSearch
                       ? 'Aucun client ne correspond à votre recherche.'
@@ -440,7 +442,9 @@ export default function ClientsPage() {
                 <tr key={c.id} className="hover:bg-[#2A2A2A] transition-colors">
                   {/* Nom */}
                   <td className="px-4 py-3">
-                    <div className="font-medium text-[#FAFAFA]">{c.name}</div>
+                    <Link to={`/app/clients/${c.id}`} className="font-medium text-[#60A5FA] hover:underline">
+                      {c.name}
+                    </Link>
                     {c.contact_person && (
                       <div className="text-xs text-[#A1A1AA] mt-0.5">{c.contact_person}</div>
                     )}
@@ -477,6 +481,18 @@ export default function ClientsPage() {
                     ) : (
                       <span className="text-[#A1A1AA]">—</span>
                     )}
+                  </td>
+
+                  {/* En retard */}
+                  <td className="px-4 py-3">
+                    {c.count_overdue > 0 ? (
+                      <div>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-400">
+                          {c.count_overdue}
+                        </span>
+                        <div className="text-xs text-red-400 mt-0.5">{formatMADShort(c.total_overdue_cents)}</div>
+                      </div>
+                    ) : <span className="text-[#A1A1AA]">—</span>}
                   </td>
 
                   {/* Statut */}

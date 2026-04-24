@@ -18,11 +18,28 @@
 
 - **Step 6** — Invoices: auto-populated lines from validated disbursements (non-taxable) and service charges (taxable, TVA 14/20%), tax math in integer cents (no float drift), Taxe Régionale 4% toggleable per invoice, French number-to-words (`amountToFrenchWords`), PDF generation matching BADR TRANSIT layout (header, shipment box, two-column line table, totals box, legal footer), payment tracking that cascades disbursement → reimbursed + job → paid, cancel-with-revert, overdue badge in sidebar. Migrations `005_invoices_completion.sql` (notes + cancelled_reason) and `006_company_info.sql` (company settings for PDF footer).
 
+- **Step 7** — Payment tracking with per-client overdue logic: aged-receivables endpoint (`GET /api/invoices/aged-receivables`) returning buckets (current / 1-30j / 31-60j / 61-90j / 90j+) by client; client statement (`GET /api/clients/:id/statement`) and payment-summary (`GET /api/clients/:id/payment-summary`) endpoints; `payment_date_from`/`payment_date_to` and `sort_by` filters on invoice list; ClientDetailPage at `/app/clients/:id` with full invoice + job history; overdue column added to ClientsPage; "Voir relevé →" link in InvoiceDetailPage; sort dropdown in InvoicesListPage. Also fixed `db.transaction()` usage in `mark-paid` and `cancel` routes (node:sqlite uses manual BEGIN/COMMIT).
+- **Step 8** — Expanded CEO dashboard: 4 alert cards (non-facturés, reçus manquants, en attente validation, factures en retard); 3 financial-pulse cards (encaissé ce mois, à encaisser, décaissements ce mois); aged-receivables stacked bar chart (CSS, no extra dep); top-clients-to-relance table; recent jobs + recent invoices row; auto-refresh every 60s with "Mis à jour à HH:mm" timestamp; logistics users see a separate LogisticsDashboard.jsx (their jobs, disbursements, open count, justificatifs à fournir).
+
+- **Step 9** — Audit log viewer UI (admin only): `GET /api/audit-log` with filters (entity type, date range, search); table with action color badges, entity links, diff panel (old in red strikethrough / new in green); pagination 100/page.
+- **Step 10** — Backup + Settings: `backend/src/scripts/backup.js` using `VACUUM INTO` (node:sqlite compatible), copies receipts + invoices, manifest.json, retention logic (keep min 7, purge >30d). Admin routes `POST /api/admin/backup-now`, `GET /api/admin/backup-info`, `GET/PUT /api/admin/settings` (whitelisted keys). `SettingsPage.jsx` with backup card, alert thresholds, numbering, company info. "Paramètres" added to admin nav. `npm run backup` script added.
+
+- **Step 11** — Production deployment: single-process mode (`SERVE_FRONTEND=true`) where backend serves the built React app from `frontend/dist`; binds to `0.0.0.0:3000` for LAN access; CORS disabled in prod (same origin); `ecosystem.config.js` for PM2; root `package.json` with `install:all` / `build` / `start` convenience scripts; full deployment documentation in README.md.
+
+- **Fiche dossier PDF** — On-demand printable job cover sheet matching the paper form, with live milestone status, QR code to job detail page, status badge, generation timestamp. Accessible from job detail page ("Imprimer fiche dossier" button). Supports both import and export layouts with type-appropriate DUM rows and milestone lists.
+
+- **Déclarant / Commis split (Step 12)** — Restructured the logistics workflow:
+  - **Terminology**: "Agent logistique" → "Déclarant" in all UI strings; `role='logistics'` unchanged in DB/code.
+  - **New entity**: `commis_agents` table for outside agents (porters, customs runners) with no app login. Managed via `/app/commis` (admin/accountant only).
+  - **New DB columns** (migration `008_declarant_and_commis.sql`): `jobs.declarant_user_id` (logistics user with app login), `jobs.commis_agent_id` (external commis); `job_assignments_log` table tracking every ownership change.
+  - **Backend**: New `/api/commis-agents` CRUD; 4 new job endpoints: `claim-declarant`, `transfer-declarant`, `force-claim-declarant`, `release-declarant`; `GET /api/jobs/my-assignments` activity feed.
+  - **Frontend**: `CommisAgentsPage.jsx`; `JobFormModal` updated (commis dropdown from commis_agents, declarant picker for admin/accountant only); `JobsListPage` with assignment pills (Mes dossiers / Non réclamés / Tous); `JobDetailPage` with claim/transfer/force-claim/release buttons + collapsible assignment history; both dashboards updated with "Dossiers non réclamés" count card; `LogisticsDashboard` shows recent assignment activity.
+  - *(corrections)* Commis field simplified to free-text `commis_name` with autocomplete from past entries (migration `009_commis_freetext.sql`; `commis_agent_id` kept as legacy read-only, `commis_agents` table emptied and reserved for future use). "Libérer" action now requires a mandatory justification note (min 5 chars), logged in `job_assignments_log` with the motif visible in history. Removed "(agent externe)" label clutter from `JobFormModal`.
+
 ## Next
-- **Step 7** — Invoice payment tracking, overdue flagging per client payment deadline.
-- **Step 8** — Expanded CEO dashboard (clients owed breakdown, monthly summaries).
-- **Step 9** — Audit log viewer UI (admin).
-- **Step 10** — Backup script (nightly copy of db + receipts to configurable folder).
+- App is feature-complete for all planned steps.
+- To go live: run `npm run build`, then `pm2 start backend/ecosystem.config.js`.
+- Optional: configure Windows Task Scheduler for daily backup.
 
 ## Users in the system (as of last session)
 - CEO / admin (default, password changed by user)

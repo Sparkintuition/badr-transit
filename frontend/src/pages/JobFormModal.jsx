@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
+import { useAuth } from '../auth/AuthContext';
 import api from '../api';
 
 const inputClass = 'w-full px-3 py-2 bg-[#2A2A2A] border border-[#333333] rounded-lg text-sm text-[#FAFAFA] placeholder-[#A1A1AA] focus:outline-none focus:ring-2 focus:ring-[#3B5BDB] focus:border-transparent';
@@ -9,7 +10,8 @@ const EMPTY_FORM = {
   type: 'import',
   dossier_number: '',
   client_id: '',
-  commis_user_id: '',
+  declarant_user_id: '',
+  commis_name: '',
   inspecteur: '',
   recu_le: '',
   expediteur_exportateur: '',
@@ -28,7 +30,8 @@ function fromJob(job) {
     type: job.type,
     dossier_number: job.dossier_number ?? '',
     client_id: String(job.client_id ?? job.client?.id ?? ''),
-    commis_user_id: String(job.commis_user_id ?? job.commis_user?.id ?? ''),
+    declarant_user_id: String(job.declarant_user_id ?? job.declarant?.id ?? ''),
+    commis_name: job.commis_name ?? '',
     inspecteur: job.inspecteur ?? '',
     recu_le: job.recu_le ?? '',
     expediteur_exportateur: job.expediteur_exportateur ?? '',
@@ -43,8 +46,71 @@ function fromJob(job) {
   };
 }
 
+function CommisAutocomplete({ value, onChange }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [allSuggestions, setAllSuggestions] = useState([]);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const wrapRef = useRef();
+
+  useEffect(() => {
+    api.get('/jobs/commis-suggestions').then((r) => setAllSuggestions(r.data)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!value.trim()) { setSuggestions([]); return; }
+    const lower = value.toLowerCase();
+    setSuggestions(allSuggestions.filter((s) => s.toLowerCase().includes(lower)));
+  }, [value, allSuggestions]);
+
+  useEffect(() => {
+    const handler = (e) => { if (wrapRef.current && !wrapRef.current.contains(e.target)) setShowDropdown(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const pick = (s) => { onChange(s); setShowDropdown(false); };
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => { onChange(e.target.value); setShowDropdown(true); }}
+        onFocus={() => setShowDropdown(true)}
+        placeholder="Nom du commis"
+        className={inputClass}
+        autoComplete="off"
+      />
+      {showDropdown && suggestions.length > 0 && (
+        <ul className="absolute z-20 top-full mt-1 w-full bg-[#2A2A2A] border border-[#444] rounded-lg shadow-xl max-h-48 overflow-y-auto">
+          {suggestions.map((s) => (
+            <li key={s}>
+              <button
+                type="button"
+                onMouseDown={() => pick(s)}
+                className="w-full text-left px-3 py-2 text-sm text-[#FAFAFA] hover:bg-[#333333] transition-colors"
+              >
+                {s}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function JobFormModal({ mode, job, onClose, onSaved }) {
-  const [form, setForm] = useState(mode === 'edit' && job ? fromJob(job) : EMPTY_FORM);
+  const { user } = useAuth();
+  const isLogistics = user?.role === 'logistics';
+
+  const [form, setForm] = useState(() => {
+    if (mode === 'edit' && job) return fromJob(job);
+    return {
+      ...EMPTY_FORM,
+      // Logistics users self-assign as declarant — backend handles it, no picker needed
+    };
+  });
   const [clients, setClients] = useState([]);
   const [logisticsUsers, setLogisticsUsers] = useState([]);
   const [fieldErrors, setFieldErrors] = useState({});
@@ -88,7 +154,7 @@ export default function JobFormModal({ mode, job, onClose, onSaved }) {
     const body = {
       type: form.type,
       client_id: form.client_id ? parseInt(form.client_id, 10) : null,
-      commis_user_id: form.commis_user_id ? parseInt(form.commis_user_id, 10) : null,
+      commis_name: form.commis_name.trim() || null,
       dossier_number: form.dossier_number.trim() || null,
       inspecteur: form.inspecteur || null,
       recu_le: form.recu_le || null,
@@ -102,6 +168,11 @@ export default function JobFormModal({ mode, job, onClose, onSaved }) {
       compagnie_transport: form.compagnie_transport || null,
       observations: form.observations || null,
     };
+
+    // Declarant: only admin/accountant can set it explicitly; logistics gets auto-set by backend
+    if (!isLogistics && form.declarant_user_id) {
+      body.declarant_user_id = parseInt(form.declarant_user_id, 10);
+    }
 
     if (mode === 'create') body.dums = [];
 
@@ -192,13 +263,32 @@ export default function JobFormModal({ mode, job, onClose, onSaved }) {
                 </select>
                 {fieldErrors.client_id && <p className="text-xs text-red-400 mt-1">{fieldErrors.client_id}</p>}
               </div>
+
+              {/* Commis (free text with autocomplete) */}
               <div>
-                <label className={labelClass}>Agent commis</label>
-                <select value={form.commis_user_id} onChange={set('commis_user_id')} className={inputClass}>
-                  <option value="">— Aucun —</option>
-                  {logisticsUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
-                </select>
+                <label className={labelClass}>Commis</label>
+                <CommisAutocomplete
+                  value={form.commis_name}
+                  onChange={(v) => {
+                    setForm((f) => ({ ...f, commis_name: v }));
+                    setFieldErrors((err) => ({ ...err, commis_name: undefined }));
+                  }}
+                />
+                {fieldErrors.commis_name && <p className="text-xs text-red-400 mt-1">{fieldErrors.commis_name}</p>}
               </div>
+
+              {/* Declarant: only shown to admin/accountant */}
+              {!isLogistics && (
+                <div>
+                  <label className={labelClass}>Déclarant</label>
+                  <select value={form.declarant_user_id} onChange={set('declarant_user_id')} className={inputClass}>
+                    <option value="">— Non réclamé —</option>
+                    {logisticsUsers.map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  </select>
+                  {fieldErrors.declarant_user_id && <p className="text-xs text-red-400 mt-1">{fieldErrors.declarant_user_id}</p>}
+                </div>
+              )}
+
               <div>
                 <label className={labelClass}>Inspecteur</label>
                 <input type="text" value={form.inspecteur} onChange={set('inspecteur')} className={inputClass} />

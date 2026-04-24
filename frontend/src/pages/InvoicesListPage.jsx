@@ -55,6 +55,7 @@ export default function InvoicesListPage() {
   const [search, setSearch] = useState('');
   const [selectedStatuses, setSelectedStatuses] = useState([]);
   const [overdueOnly, setOverdueOnly] = useState(false);
+  const [sortBy, setSortBy] = useState('');
 
   const [markPaidId, setMarkPaidId] = useState(null);
   const [cancelId, setCancelId] = useState(null);
@@ -70,6 +71,7 @@ export default function InvoicesListPage() {
       if (search.trim()) params.search = search.trim();
       if (selectedStatuses.length > 0) params.status = selectedStatuses.join(',');
       if (overdueOnly) params.overdue_only = '1';
+      if (sortBy) params.sort_by = sortBy;
       const r = await api.get('/invoices', { params });
       setItems(r.data.items || []);
       setTotal(r.data.total || 0);
@@ -81,7 +83,7 @@ export default function InvoicesListPage() {
     }
   }
 
-  useEffect(() => { loadInvoices(); }, [search, selectedStatuses, overdueOnly, page]);
+  useEffect(() => { loadInvoices(); }, [search, selectedStatuses, overdueOnly, sortBy, page]);
 
   function toggleStatus(s) {
     setSelectedStatuses((prev) =>
@@ -162,6 +164,13 @@ export default function InvoicesListPage() {
               className="rounded" />
             En retard seulement
           </label>
+          <select value={sortBy} onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
+            className="px-3 py-2 bg-[#2A2A2A] border border-[#333333] rounded-lg text-sm text-[#FAFAFA] focus:outline-none focus:ring-2 focus:ring-[#3B5BDB]">
+            <option value="">Trier : Date de création ↓</option>
+            <option value="due_date">Trier : Échéance (proches en premier)</option>
+            <option value="overdue">Trier : En retard (plus anciennes d'abord)</option>
+            <option value="client">Trier : Client A → Z</option>
+          </select>
         </div>
         <div className="flex flex-wrap gap-2">
           {ALL_STATUSES.map((s) => (

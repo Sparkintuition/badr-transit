@@ -85,6 +85,40 @@
 - **On cancel**: disbursements → `invoice_id=NULL, status='signed'` (revert); service_charges → `invoice_id=NULL`; job → `released`. PDF kept on disk.
 - PDF stored at `backend/data/invoices/YYYY/{facture_number}.pdf`. Served via auth-protected `GET /api/invoices/:id/pdf`.
 
+## Logistics roles and job ownership
+- **Déclarant**: a logistics user (role `'logistics'`) who has claimed a job in-app. UI label is "Déclarant" everywhere; the DB column is `declarant_user_id` on `jobs` and the role value is still `'logistics'`.
+- **Commis**: an external outside agent (porter, customs runner) with no app login, stored in the `commis_agents` table. Linked to jobs via `jobs.commis_agent_id`. Managed on `/app/commis`.
+- **Legacy `commis_user_id`**: jobs created before the split have `commis_user_id` pointing to the `users` table. `buildFullJob()` returns both `commis_user` (legacy) and `commis` (new); the frontend displays `job.commis?.name || job.commis_user?.name`.
+- **Ownership changes** must go through dedicated endpoints — never via `PUT /jobs/:id`:
+  - `POST /:id/claim-declarant` — logistics claiming an unassigned job
+  - `POST /:id/transfer-declarant` — logistics (if current declarant) or admin/accountant reassigning
+  - `POST /:id/force-claim-declarant` — logistics overriding another declarant (requires note ≥ 5 chars, logged with `is_force_claim=1`)
+  - `POST /:id/release-declarant` — current declarant or admin/accountant setting declarant to NULL
+- All ownership changes are logged to `job_assignments_log` with `from_user_id`, `to_user_id`, `is_force_claim`, `note`.
+- `jobUpdateSchema` deliberately omits `declarant_user_id` so `PUT /jobs/:id` cannot silently overwrite the declarant.
+
+## Dashboards
+- **Admin / Accountant dashboard** (`DashboardPage.jsx`): operational overview — 4+ alert cards (including "Dossiers non réclamés"), 3 financial-pulse cards, aged-receivables stacked bar, top clients to relance, recent jobs + invoices. Auto-refreshes every 60 seconds.
+- **Logistics dashboard** (`LogisticsDashboard.jsx`): task-focused — their open jobs, disbursements, justificatifs à fournir count, unassigned dossiers count, recent assignment activity. Auto-refreshes every 60 seconds.
+- Role branch: `DashboardPage` renders `<LogisticsDashboard />` when `user.role === 'logistics'`, full dashboard otherwise.
+- `overdue` is a computed status (not stored in DB). `GET /api/invoices/aged-receivables` buckets all `status='sent'` invoices by days overdue (current / 1-30 / 31-60 / 61-90 / 90+).
+
+## Deployment
+- **Dev**: `npm run dev:backend` + `npm run dev:frontend` (two processes; Vite proxies `/api` to port 3000)
+- **Prod**: `npm run build` then `pm2 start backend/ecosystem.config.js` (one process on port 3000)
+- Frontend must be rebuilt (`npm run build`) before (re)starting prod — the backend serves `frontend/dist/`
+- `NODE_ENV=production` or `SERVE_FRONTEND=true` activates static serving and disables CORS
+- App binds to `0.0.0.0` — reachable from any device on the LAN at `http://<server-ip>:3000`
+- PM2 auto-restarts on crash; `pm2-windows-startup` enables auto-start on Windows boot
+- Windows Firewall must allow Node.js on port 3000 the first time it runs
+- PM2 logs go to `backend/logs/` (excluded from git via `.gitignore`)
+
+## PDF outputs
+- All PDFs share the same header and footer rendering via `backend/src/services/pdfShared.js` (`renderPdfHeader`, `renderPdfFooter`). Any new PDF feature must use these functions for consistency.
+- PDFs are stored in `backend/data/` subfolders by type: invoices in `data/invoices/YYYY/`, job sheets in `data/job_sheets/YYYY/MM/`. Job sheets are regenerated on every request (content changes); invoice PDFs are generated once and cached.
+- QR code URLs in job sheet PDFs use the `app_url_base` setting (table `settings`, key `app_url_base`). Update this setting via the Paramètres page whenever the server IP changes.
+- Job sheet PDF endpoint: `GET /api/jobs/:id/sheet-pdf` — accessible by all roles (admin, accountant, logistics; logistics restricted to their own jobs).
+
 ## Migrations
 - Numbered SQL files in `backend/src/db/migrations/` (e.g., `003_feature_name.sql`).
 - Track applied migrations in `schema_migrations` table.

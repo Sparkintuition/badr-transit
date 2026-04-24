@@ -1,11 +1,13 @@
 const { Router } = require('express');
 const { z } = require('zod');
+const fs = require('fs');
 const db = require('../db/db');
 const { requireAuth, requireRole } = require('../auth/middleware');
 const { logAudit } = require('../utils/audit');
 const { zodFieldErrors } = require('../utils/validators');
 const { jobBodySchema, jobUpdateSchema, dumSchema, milestoneUpdateSchema } = require('../validators/jobs');
 const { createMilestonesForJob } = require('../services/jobsHelpers');
+const { generateJobSheetPdf } = require('../services/jobSheetPdfService');
 const serviceChargesRouter = require('./service-charges');
 
 const router = Router();
@@ -16,7 +18,7 @@ router.use('/:id/service-charges', serviceChargesRouter);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function buildFullJob(jobId, userRole) {
+function buildFullJob(jobId, userRole, { includeLog = false } = {}) {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(jobId);
   if (!job) return null;
 
@@ -24,8 +26,21 @@ function buildFullJob(jobId, userRole) {
     'SELECT id, name, ice, payment_deadline_days FROM clients WHERE id = ?'
   ).get(job.client_id);
 
+  // Legacy commis (users table via commis_user_id)
   const commisUser = job.commis_user_id
     ? db.prepare('SELECT id, name FROM users WHERE id = ?').get(job.commis_user_id)
+    : null;
+
+  // commis_name: use free-text field; fall back to legacy commis_agents lookup for old jobs
+  let commisName = job.commis_name ?? null;
+  if (!commisName && job.commis_agent_id) {
+    const agent = db.prepare('SELECT name FROM commis_agents WHERE id = ?').get(job.commis_agent_id);
+    commisName = agent?.name ?? null;
+  }
+
+  // Declarant (logistics user with login)
+  const declarant = job.declarant_user_id
+    ? db.prepare('SELECT id, name FROM users WHERE id = ?').get(job.declarant_user_id)
     : null;
 
   const dums = db.prepare(
@@ -51,14 +66,103 @@ function buildFullJob(jobId, userRole) {
     'SELECT id, facture_number, issue_date, due_date, status, total_ttc_cents FROM invoices WHERE job_id = ?'
   ).get(jobId);
 
-  return { ...job, client, commis_user: commisUser, dums, milestones, disbursements, service_charges: serviceCharges, invoice: invoice || null };
+  const result = {
+    ...job,
+    client,
+    commis_user: commisUser,
+    commis_name: commisName,
+    declarant,
+    dums,
+    milestones,
+    disbursements,
+    service_charges: serviceCharges,
+    invoice: invoice || null,
+  };
+
+  if (includeLog) {
+    result.assignments_log = db.prepare(`
+      SELECT
+        l.id, l.field, l.is_force_claim, l.note, l.changed_at,
+        l.from_user_id, fu.name AS from_user_name,
+        l.to_user_id, tu.name AS to_user_name,
+        l.from_commis_agent_id, fca.name AS from_commis_name,
+        l.to_commis_agent_id, tca.name AS to_commis_name,
+        l.changed_by_user_id, cbu.name AS changed_by_name
+      FROM job_assignments_log l
+      LEFT JOIN users fu  ON l.from_user_id = fu.id
+      LEFT JOIN users tu  ON l.to_user_id = tu.id
+      LEFT JOIN commis_agents fca ON l.from_commis_agent_id = fca.id
+      LEFT JOIN commis_agents tca ON l.to_commis_agent_id = tca.id
+      LEFT JOIN users cbu ON l.changed_by_user_id = cbu.id
+      WHERE l.job_id = ?
+      ORDER BY l.changed_at DESC
+    `).all(jobId);
+  }
+
+  return result;
 }
+
+function logAssignment(db, { jobId, field, fromUserId, toUserId, fromCommisId, toCommisId, changedBy, isForceClaim, note }) {
+  db.prepare(`
+    INSERT INTO job_assignments_log
+      (job_id, field, from_user_id, to_user_id, from_commis_agent_id, to_commis_agent_id, changed_by_user_id, is_force_claim, note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    jobId, field,
+    fromUserId ?? null, toUserId ?? null,
+    fromCommisId ?? null, toCommisId ?? null,
+    changedBy, isForceClaim ? 1 : 0, note ?? null,
+  );
+}
+
+// ─── GET /api/jobs/my-assignments ─────────────────────────────────────────────
+// Must be declared BEFORE /:id to avoid route shadowing
+
+router.get('/my-assignments', (req, res) => {
+  const limit = Math.min(20, parseInt(req.query.limit || '10', 10));
+  const userId = req.user.id;
+
+  const rows = db.prepare(`
+    SELECT
+      l.id, l.field, l.is_force_claim, l.note, l.changed_at,
+      l.job_id, j.dossier_number,
+      l.from_user_id, fu.name AS from_user_name,
+      l.to_user_id,   tu.name AS to_user_name,
+      l.changed_by_user_id, cbu.name AS changed_by_name
+    FROM job_assignments_log l
+    LEFT JOIN jobs j   ON l.job_id = j.id
+    LEFT JOIN users fu ON l.from_user_id = fu.id
+    LEFT JOIN users tu ON l.to_user_id = tu.id
+    LEFT JOIN users cbu ON l.changed_by_user_id = cbu.id
+    WHERE l.field = 'declarant' AND (l.from_user_id = ? OR l.to_user_id = ?)
+    ORDER BY l.changed_at DESC
+    LIMIT ?
+  `).all(userId, userId, limit);
+
+  res.json(rows);
+});
+
+// ─── GET /api/jobs/commis-suggestions ────────────────────────────────────────
+// Must be declared BEFORE /:id to avoid route shadowing
+
+router.get('/commis-suggestions', (req, res) => {
+  const rows = db.prepare(`
+    SELECT commis_name, COUNT(*) AS freq
+    FROM jobs
+    WHERE commis_name IS NOT NULL AND commis_name != ''
+    GROUP BY commis_name
+    ORDER BY freq DESC, commis_name ASC
+    LIMIT 30
+  `).all();
+  res.json(rows.map((r) => r.commis_name));
+});
 
 // ─── GET /api/jobs ────────────────────────────────────────────────────────────
 
 router.get('/', (req, res) => {
   const {
-    type, status, client_id, commis_user_id, search = '',
+    type, status, client_id, commis_user_id, declarant_user_id,
+    unassigned, search = '',
     include_archived = '0', page = '1', page_size = '50',
   } = req.query;
 
@@ -73,7 +177,15 @@ router.get('/', (req, res) => {
   if (type) { where.push('j.type = ?'); params.push(type); }
   if (status) { where.push('j.status = ?'); params.push(status); }
   if (client_id) { where.push('j.client_id = ?'); params.push(parseInt(client_id, 10)); }
+  // Legacy filter (kept for backward compat)
   if (commis_user_id) { where.push('j.commis_user_id = ?'); params.push(parseInt(commis_user_id, 10)); }
+  // New declarant filter
+  if (unassigned === '1') {
+    where.push('j.declarant_user_id IS NULL');
+  } else if (declarant_user_id) {
+    where.push('j.declarant_user_id = ?');
+    params.push(parseInt(declarant_user_id, 10));
+  }
   if (search.trim()) {
     const term = `%${search.trim()}%`;
     where.push('(j.dossier_number LIKE ? OR j.expediteur_exportateur LIKE ? OR EXISTS (SELECT 1 FROM job_dums jd WHERE jd.job_id = j.id AND jd.dum_number LIKE ?))');
@@ -87,17 +199,22 @@ router.get('/', (req, res) => {
   const rows = db.prepare(`
     SELECT
       j.id, j.dossier_number, j.type, j.status, j.archived, j.created_at,
-      j.release_date, j.recu_le, j.inspecteur, j.client_id, j.commis_user_id, j.observations,
-      c.name AS client_name, c.ice AS client_ice,
-      u.name AS commis_name,
+      j.release_date, j.recu_le, j.inspecteur, j.client_id, j.commis_user_id,
+      j.commis_agent_id, j.commis_name, j.declarant_user_id, j.observations,
+      c.name  AS client_name, c.ice AS client_ice,
+      cu.name AS commis_legacy_name,
+      ca.name AS commis_agent_legacy_name,
+      du.name AS declarant_name,
       (SELECT COUNT(*) FROM job_milestones WHERE job_id = j.id) AS milestones_total,
       (SELECT COUNT(*) FROM job_milestones WHERE job_id = j.id AND status = 'completed') AS milestones_completed,
       (SELECT COUNT(*) FROM job_milestones WHERE job_id = j.id AND status = 'skipped') AS milestones_skipped,
       (SELECT COUNT(*) FROM disbursements WHERE job_id = j.id AND status != 'cancelled') AS disbursements_count,
       (SELECT COALESCE(SUM(amount_cents),0) FROM disbursements WHERE job_id = j.id AND status != 'cancelled') AS disbursements_total_cents
     FROM jobs j
-    LEFT JOIN clients c ON j.client_id = c.id
-    LEFT JOIN users u ON j.commis_user_id = u.id
+    LEFT JOIN clients c        ON j.client_id = c.id
+    LEFT JOIN users cu         ON j.commis_user_id = cu.id
+    LEFT JOIN commis_agents ca ON j.commis_agent_id = ca.id
+    LEFT JOIN users du         ON j.declarant_user_id = du.id
     ${clause}
     ORDER BY j.created_at DESC
     LIMIT ? OFFSET ?
@@ -114,7 +231,9 @@ router.get('/', (req, res) => {
     recu_le: r.recu_le,
     inspecteur: r.inspecteur,
     client: { id: r.client_id, name: r.client_name, ice: r.client_ice },
-    commis_user: r.commis_user_id ? { id: r.commis_user_id, name: r.commis_name } : null,
+    commis_user: r.commis_user_id ? { id: r.commis_user_id, name: r.commis_legacy_name } : null,
+    commis_name: r.commis_name || r.commis_agent_legacy_name || null,
+    declarant: r.declarant_user_id ? { id: r.declarant_user_id, name: r.declarant_name } : null,
     milestones_total: r.milestones_total,
     milestones_completed: r.milestones_completed,
     milestones_skipped: r.milestones_skipped,
@@ -145,7 +264,7 @@ router.get('/', (req, res) => {
 // ─── GET /api/jobs/:id ────────────────────────────────────────────────────────
 
 router.get('/:id', (req, res) => {
-  const job = buildFullJob(req.params.id, req.user.role);
+  const job = buildFullJob(req.params.id, req.user.role, { includeLog: true });
   if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
   res.json(job);
 });
@@ -158,14 +277,23 @@ router.post('/', (req, res) => {
 
   const data = parsed.data;
 
-  // Validate client
   const client = db.prepare('SELECT id FROM clients WHERE id = ? AND active = 1').get(data.client_id);
   if (!client) return res.status(400).json({ errors: { client_id: 'Client introuvable ou inactif' } });
 
-  // Validate commis
+  // Legacy commis_user_id validation (for old jobs being migrated)
   if (data.commis_user_id) {
     const commis = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'logistics' AND active = 1").get(data.commis_user_id);
-    if (!commis) return res.status(400).json({ errors: { commis_user_id: 'Agent logistique introuvable' } });
+    if (!commis) return res.status(400).json({ errors: { commis_user_id: 'Déclarant introuvable' } });
+  }
+  // commis_agent_id is ignored for new jobs (free-text commis_name is used instead)
+
+  // Declarant auto-set: logistics users self-claim on create
+  let declarantId = data.declarant_user_id ?? null;
+  if (req.user.role === 'logistics' && !declarantId) {
+    declarantId = req.user.id;
+  } else if (declarantId) {
+    const decl = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'logistics' AND active = 1").get(declarantId);
+    if (!decl) return res.status(400).json({ errors: { declarant_user_id: 'Déclarant introuvable ou inactif' } });
   }
 
   let dossierNumber = data.dossier_number?.trim() || null;
@@ -187,13 +315,15 @@ router.post('/', (req, res) => {
     const { lastInsertRowid } = db.prepare(`
       INSERT INTO jobs (
         dossier_number, type, client_id, status, created_by_user_id,
-        commis_user_id, inspecteur, recu_le, expediteur_exportateur, nombre_colis_tc,
+        commis_user_id, declarant_user_id, commis_name,
+        inspecteur, recu_le, expediteur_exportateur, nombre_colis_tc,
         poids_brut_kg, nature_marchandise, bureau, depot_sequence_date, arrival_date,
         compagnie_transport, observations
-      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       dossierNumber, data.type, data.client_id, req.user.id,
-      data.commis_user_id ?? null, data.inspecteur ?? null, data.recu_le ?? null,
+      data.commis_user_id ?? null, declarantId, data.commis_name ?? null,
+      data.inspecteur ?? null, data.recu_le ?? null,
       data.expediteur_exportateur ?? null, data.nombre_colis_tc ?? null,
       data.poids_brut_kg ?? null, data.nature_marchandise ?? null,
       data.bureau ?? null, data.depot_sequence_date ?? null, data.arrival_date ?? null,
@@ -208,6 +338,16 @@ router.post('/', (req, res) => {
     );
     (data.dums || []).forEach((d, i) => insertDum.run(jobId, d.dum_number, d.dum_date ?? null, (i + 1) * 10));
 
+    // Log declarant assignment
+    if (declarantId) {
+      logAssignment(db, {
+        jobId, field: 'declarant',
+        fromUserId: null, toUserId: declarantId,
+        changedBy: req.user.id, isForceClaim: false, note: 'Création du dossier',
+      });
+    }
+    // commis_name is free text — no assignment log needed for creation
+
     db.exec('COMMIT');
 
     const created = buildFullJob(jobId, req.user.role);
@@ -221,6 +361,7 @@ router.post('/', (req, res) => {
 });
 
 // ─── PUT /api/jobs/:id ────────────────────────────────────────────────────────
+// NOTE: declarant_user_id is intentionally excluded — use the dedicated endpoints.
 
 router.put('/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
@@ -241,18 +382,25 @@ router.put('/:id', (req, res) => {
 
   if (data.commis_user_id) {
     const commis = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'logistics' AND active = 1").get(data.commis_user_id);
-    if (!commis) return res.status(400).json({ errors: { commis_user_id: 'Agent logistique introuvable' } });
+    if (!commis) return res.status(400).json({ errors: { commis_user_id: 'Déclarant introuvable' } });
   }
+  // commis_agent_id is ignored for updates (free-text commis_name is used)
 
   db.prepare(`
     UPDATE jobs SET
-      client_id = ?, commis_user_id = ?, inspecteur = ?, recu_le = ?,
+      client_id = ?,
+      commis_user_id = ?,
+      commis_name = ?,
+      inspecteur = ?, recu_le = ?,
       expediteur_exportateur = ?, nombre_colis_tc = ?, poids_brut_kg = ?,
       nature_marchandise = ?, bureau = ?, depot_sequence_date = ?, arrival_date = ?,
       compagnie_transport = ?, observations = ?
     WHERE id = ?
   `).run(
-    data.client_id, data.commis_user_id ?? null, data.inspecteur ?? null, data.recu_le ?? null,
+    data.client_id,
+    'commis_user_id' in data ? (data.commis_user_id ?? null) : existing.commis_user_id,
+    'commis_name' in data ? (data.commis_name ?? null) : existing.commis_name,
+    data.inspecteur ?? null, data.recu_le ?? null,
     data.expediteur_exportateur ?? null, data.nombre_colis_tc ?? null, data.poids_brut_kg ?? null,
     data.nature_marchandise ?? null, data.bureau ?? null, data.depot_sequence_date ?? null,
     data.arrival_date ?? null, data.compagnie_transport ?? null, data.observations ?? null, id,
@@ -262,6 +410,146 @@ router.put('/:id', (req, res) => {
   logAudit(db, { user_id: req.user.id, action: 'update', entity_type: 'job', entity_id: id, old_value: existing, new_value: updated });
 
   res.json(updated);
+});
+
+// ─── POST /api/jobs/:id/claim-declarant ───────────────────────────────────────
+
+router.post('/:id/claim-declarant', requireRole('logistics'), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const job = db.prepare('SELECT id, declarant_user_id FROM jobs WHERE id = ?').get(id);
+  if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
+
+  if (job.declarant_user_id !== null) {
+    return res.status(409).json({ error: 'Ce dossier est déjà réclamé par un déclarant.' });
+  }
+
+  db.prepare('UPDATE jobs SET declarant_user_id = ? WHERE id = ?').run(req.user.id, id);
+  logAssignment(db, {
+    jobId: id, field: 'declarant',
+    fromUserId: null, toUserId: req.user.id,
+    changedBy: req.user.id, isForceClaim: false, note: 'Réclamé',
+  });
+  logAudit(db, { user_id: req.user.id, action: 'claim_declarant', entity_type: 'job', entity_id: id, new_value: { declarant_user_id: req.user.id } });
+
+  res.json(buildFullJob(id, req.user.role, { includeLog: true }));
+});
+
+// ─── POST /api/jobs/:id/transfer-declarant ────────────────────────────────────
+
+router.post('/:id/transfer-declarant', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const job = db.prepare('SELECT id, declarant_user_id FROM jobs WHERE id = ?').get(id);
+  if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
+
+  const parsed = z.object({
+    to_user_id: z.number().int().positive(),
+    note: z.string().max(500).optional().nullable(),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ errors: zodFieldErrors(parsed.error) });
+
+  const { to_user_id, note } = parsed.data;
+
+  // Logistics can only transfer if they are the current declarant or the job is unassigned
+  if (req.user.role === 'logistics') {
+    const isCurrentDeclarant = job.declarant_user_id === req.user.id;
+    const isUnassigned = job.declarant_user_id === null;
+    if (!isCurrentDeclarant && !isUnassigned) {
+      return res.status(403).json({ error: 'Vous ne pouvez transférer que vos propres dossiers.' });
+    }
+  }
+
+  const target = db.prepare("SELECT id FROM users WHERE id = ? AND role = 'logistics' AND active = 1").get(to_user_id);
+  if (!target) return res.status(400).json({ errors: { to_user_id: 'Déclarant cible introuvable ou inactif.' } });
+
+  const prevDeclarantId = job.declarant_user_id;
+  db.prepare('UPDATE jobs SET declarant_user_id = ? WHERE id = ?').run(to_user_id, id);
+  logAssignment(db, {
+    jobId: id, field: 'declarant',
+    fromUserId: prevDeclarantId, toUserId: to_user_id,
+    changedBy: req.user.id, isForceClaim: false, note: note ?? null,
+  });
+  logAudit(db, {
+    user_id: req.user.id, action: 'transfer_declarant', entity_type: 'job', entity_id: id,
+    old_value: { declarant_user_id: prevDeclarantId }, new_value: { declarant_user_id: to_user_id },
+  });
+
+  res.json(buildFullJob(id, req.user.role, { includeLog: true }));
+});
+
+// ─── POST /api/jobs/:id/force-claim-declarant ─────────────────────────────────
+
+router.post('/:id/force-claim-declarant', requireRole('logistics'), (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const job = db.prepare('SELECT id, declarant_user_id FROM jobs WHERE id = ?').get(id);
+  if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
+
+  if (!job.declarant_user_id) {
+    return res.status(409).json({ error: 'Ce dossier n\'a pas de déclarant — utilisez "Réclamer" à la place.' });
+  }
+  if (job.declarant_user_id === req.user.id) {
+    return res.status(409).json({ error: 'Vous êtes déjà le déclarant de ce dossier.' });
+  }
+
+  const parsed = z.object({
+    note: z.string().min(5, 'Le motif doit contenir au moins 5 caractères').max(500),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ errors: zodFieldErrors(parsed.error) });
+
+  const { note } = parsed.data;
+  const prevDeclarantId = job.declarant_user_id;
+
+  db.prepare('UPDATE jobs SET declarant_user_id = ? WHERE id = ?').run(req.user.id, id);
+  logAssignment(db, {
+    jobId: id, field: 'declarant',
+    fromUserId: prevDeclarantId, toUserId: req.user.id,
+    changedBy: req.user.id, isForceClaim: true, note,
+  });
+  logAudit(db, {
+    user_id: req.user.id, action: 'force_claim', entity_type: 'job', entity_id: id,
+    old_value: { declarant_user_id: prevDeclarantId }, new_value: { declarant_user_id: req.user.id, note },
+  });
+
+  res.json(buildFullJob(id, req.user.role, { includeLog: true }));
+});
+
+// ─── POST /api/jobs/:id/release-declarant ────────────────────────────────────
+
+router.post('/:id/release-declarant', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const job = db.prepare('SELECT id, declarant_user_id FROM jobs WHERE id = ?').get(id);
+  if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
+
+  if (!job.declarant_user_id) {
+    return res.status(409).json({ error: 'Ce dossier n\'a pas de déclarant.' });
+  }
+
+  // Only current declarant or admin/accountant can release
+  if (req.user.role === 'logistics' && job.declarant_user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Vous ne pouvez libérer que vos propres dossiers.' });
+  }
+
+  const parsed = z.object({
+    note: z.string().min(5, 'Motif requis pour libérer ce dossier.').max(500),
+  }).safeParse(req.body);
+  if (!parsed.success) {
+    const firstMsg = Object.values(zodFieldErrors(parsed.error))[0] || 'Motif requis pour libérer ce dossier.';
+    return res.status(400).json({ errors: { note: firstMsg } });
+  }
+
+  const { note } = parsed.data;
+  const prevDeclarantId = job.declarant_user_id;
+  db.prepare('UPDATE jobs SET declarant_user_id = NULL WHERE id = ?').run(id);
+  logAssignment(db, {
+    jobId: id, field: 'declarant',
+    fromUserId: prevDeclarantId, toUserId: null,
+    changedBy: req.user.id, isForceClaim: false, note,
+  });
+  logAudit(db, {
+    user_id: req.user.id, action: 'release_declarant', entity_type: 'job', entity_id: id,
+    old_value: { declarant_user_id: prevDeclarantId }, new_value: { declarant_user_id: null, note },
+  });
+
+  res.json(buildFullJob(id, req.user.role, { includeLog: true }));
 });
 
 // ─── PATCH /api/jobs/:id/status ───────────────────────────────────────────────
@@ -403,6 +691,33 @@ router.patch('/:id/milestones/:milestone_id', (req, res) => {
   });
 
   res.json(updated);
+});
+
+// ─── GET /api/jobs/:id/sheet-pdf ──────────────────────────────────────────────
+
+router.get('/:id/sheet-pdf', async (req, res) => {
+  const job = db.prepare('SELECT id, dossier_number, commis_user_id, declarant_user_id FROM jobs WHERE id = ?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Dossier introuvable' });
+
+  // Logistics can access PDFs for jobs they are the declarant of, or legacy commis assignee
+  if (req.user.role === 'logistics') {
+    const isDeclarant = job.declarant_user_id === req.user.id;
+    const isLegacyCommis = job.commis_user_id === req.user.id;
+    if (!isDeclarant && !isLegacyCommis) {
+      return res.status(403).json({ error: 'Accès refusé.' });
+    }
+  }
+
+  try {
+    const pdfPath = await generateJobSheetPdf(job.id);
+    const filename = `Fiche_Dossier_${job.dossier_number.replace(/\//g, '-')}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    fs.createReadStream(pdfPath).pipe(res);
+  } catch (err) {
+    console.error('Job sheet PDF error:', err);
+    res.status(500).json({ error: 'Erreur lors de la génération de la fiche dossier.' });
+  }
 });
 
 module.exports = router;

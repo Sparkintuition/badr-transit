@@ -1,288 +1,330 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import api from '../api';
 import DisbursementDetailModal from '../components/DisbursementDetailModal';
-import { formatMAD, formatMADShort, DISBURSEMENT_STATUS_LABEL } from '../utils/format';
+import LogisticsDashboard from './LogisticsDashboard';
+import { formatMAD, formatMADShort, formatDate } from '../utils/format';
 
-const ROLE_LABEL = { admin: 'Administrateur', accountant: 'Comptable', logistics: 'Agent logistique' };
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// ─── Stat card ────────────────────────────────────────────────────────────────
+function thisMonthRange() {
+  const now = new Date();
+  const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0');
+  const last = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  return { from: `${y}-${m}-01`, to: `${y}-${m}-${last}` };
+}
 
-function StatCard({ title, value, sub, color, to }) {
+function fmtTime(d) {
+  return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+
+// ─── Stat card (alert style) ──────────────────────────────────────────────────
+
+function AlertCard({ title, value, sub, color, to }) {
   const inner = (
-    <div className={`rounded-xl border p-4 transition-colors h-full ${
+    <div className={`rounded-xl border p-4 h-full transition-colors ${
       color === 'red'   ? 'border-red-800/60 bg-red-900/10 hover:bg-red-900/20' :
       color === 'amber' ? 'border-amber-800/60 bg-amber-900/10 hover:bg-amber-900/20' :
+      color === 'green' ? 'border-emerald-800/60 bg-emerald-900/10 hover:bg-emerald-900/20' :
                           'border-[#333333] bg-[#242424] hover:bg-[#2A2A2A]'
     }`}>
-      <p className={`text-xs font-medium ${color === 'red' ? 'text-red-400' : color === 'amber' ? 'text-amber-400' : 'text-[#A1A1AA]'}`}>
-        {title}
-      </p>
-      <p className={`text-2xl font-bold mt-1 ${color === 'red' ? 'text-red-300' : color === 'amber' ? 'text-amber-300' : 'text-[#FAFAFA]'}`}>
-        {value}
-      </p>
+      <p className={`text-xs font-medium ${
+        color === 'red' ? 'text-red-400' : color === 'amber' ? 'text-amber-400' : color === 'green' ? 'text-emerald-400' : 'text-[#A1A1AA]'
+      }`}>{title}</p>
+      <p className={`text-2xl font-bold mt-1 ${
+        color === 'red' ? 'text-red-300' : color === 'amber' ? 'text-amber-300' : color === 'green' ? 'text-emerald-300' : 'text-[#FAFAFA]'
+      }`}>{value}</p>
       {sub && <p className="text-xs text-[#A1A1AA] mt-0.5">{sub}</p>}
     </div>
   );
-  if (to) return <Link to={to} className="block">{inner}</Link>;
+  if (to) return <Link to={to} className="block h-full">{inner}</Link>;
   return inner;
 }
 
-// ─── Status badge ─────────────────────────────────────────────────────────────
+// ─── Aged receivables bar ─────────────────────────────────────────────────────
 
-const STATUS_BADGE = {
-  pending_signature: 'bg-blue-900/40 text-blue-300 border border-blue-800',
-  signed:            'bg-amber-900/40 text-amber-300 border border-amber-800',
-  invoiced:          'bg-emerald-900/40 text-emerald-300 border border-emerald-800',
-  reimbursed:        'bg-emerald-700/60 text-white border border-emerald-600',
-  cancelled:         'bg-red-900/40 text-red-300 border border-red-800',
-};
+const AR_SEGMENTS = [
+  { key: 'current',  label: 'À terme',  color: '#10B981' },
+  { key: '1_30',    label: '1-30j',    color: '#F59E0B' },
+  { key: '31_60',   label: '31-60j',   color: '#F97316' },
+  { key: '61_90',   label: '61-90j',   color: '#EF4444' },
+  { key: '90_plus', label: '>90j',     color: '#991B1B' },
+];
+
+function AgedBar({ buckets, total }) {
+  if (!total) return <p className="text-sm text-[#A1A1AA]">Aucune créance en cours.</p>;
+  return (
+    <div className="space-y-3">
+      <div className="flex h-7 rounded-md overflow-hidden gap-px">
+        {AR_SEGMENTS.map(({ key, color }) => {
+          const pct = (buckets[key]?.total_cents || 0) / total * 100;
+          if (pct < 0.5) return null;
+          return (
+            <div key={key} style={{ width: `${pct}%`, backgroundColor: color }}
+              title={`${formatMAD(buckets[key]?.total_cents || 0)}`} />
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-5 gap-y-1.5">
+        {AR_SEGMENTS.map(({ key, label, color }) => {
+          const b = buckets[key] || { count: 0, total_cents: 0 };
+          return (
+            <div key={key} className="flex items-center gap-1.5">
+              <div className="w-2.5 h-2.5 rounded-sm flex-shrink-0" style={{ backgroundColor: color }} />
+              <span className="text-xs text-[#A1A1AA]">{label}</span>
+              <span className="text-xs font-medium text-[#FAFAFA]">{formatMADShort(b.total_cents)}</span>
+              {b.count > 0 && <span className="text-xs text-[#555555]">({b.count})</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
-  const isAccountant = user?.role === 'accountant';
+  const isAdmin     = user?.role === 'admin';
   const isLogistics = user?.role === 'logistics';
-  const canSeeFinancial = isAdmin || isAccountant;
+  const canSee      = !isLogistics;
 
-  const [stats, setStats] = useState(null);
-  const [invoiceAlerts, setInvoiceAlerts] = useState(null);
-  const [recentSigned, setRecentSigned] = useState([]);
-  const [topClients, setTopClients] = useState([]);
-  const [myJobs, setMyJobs] = useState([]);
-  const [myDisbs, setMyDisbs] = useState([]);
-  const [detailId, setDetailId] = useState(null);
+  if (isLogistics) return <LogisticsDashboard />;
 
-  function refreshStats() {
-    api.get('/disbursements/stats').then((r) => setStats(r.data)).catch(() => {});
-    api.get('/invoices/alerts').then((r) => setInvoiceAlerts(r.data)).catch(() => {});
+  const [stats, setStats]             = useState(null);
+  const [alerts, setAlerts]           = useState(null);
+  const [agedAR, setAgedAR]           = useState(null);
+  const [paidThisMonth, setPaidThisMonth] = useState(0);
+  const [recentJobs, setRecentJobs]   = useState([]);
+  const [recentInvoices, setRecentInvoices] = useState([]);
+  const [unassignedCount, setUnassignedCount] = useState(0);
+  const [detailId, setDetailId]       = useState(null);
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+
+  async function loadAll() {
+    const { from, to } = thisMonthRange();
+
+    await Promise.allSettled([
+      api.get('/disbursements/stats').then((r) => setStats(r.data)),
+      api.get('/invoices/alerts').then((r) => setAlerts(r.data)),
+      api.get('/invoices/aged-receivables').then((r) => setAgedAR(r.data)),
+      api.get('/invoices', { params: { status: 'paid', payment_date_from: from, payment_date_to: to, page_size: 500 } })
+        .then((r) => setPaidThisMonth(r.data.summary?.total_ttc_cents || 0)),
+      api.get('/jobs', { params: { page_size: 5 } })
+        .then((r) => setRecentJobs(r.data.items || [])),
+      api.get('/invoices', { params: { page_size: 5 } })
+        .then((r) => setRecentInvoices(r.data.items || [])),
+      api.get('/jobs', { params: { unassigned: '1', page_size: '1' } })
+        .then((r) => setUnassignedCount(r.data.total || 0)),
+    ]);
+
+    setLastRefresh(new Date());
   }
 
   useEffect(() => {
-    if (canSeeFinancial) {
-      refreshStats();
+    loadAll();
+    const iv = setInterval(loadAll, 60000);
+    return () => clearInterval(iv);
+  }, []);
 
-      api.get('/disbursements', {
-        params: { status: 'signed', page_size: '5' },
-      }).then((r) => setRecentSigned(r.data.items || [])).catch(() => {});
+  const topClientsToRelance = (agedAR?.by_client || [])
+    .filter((c) => c['1_30_cents'] + c['31_60_cents'] + c['61_90_cents'] + c['90_plus_cents'] > 0)
+    .slice(0, 5);
 
-      api.get('/disbursements', {
-        params: { status: 'signed', page_size: '200' },
-      }).then((r) => {
-        const byClient = {};
-        for (const d of (r.data.items || [])) {
-          if (!d.invoice_id) {
-            const key = d.job.client.id;
-            if (!byClient[key]) byClient[key] = { name: d.job.client.name, total: 0 };
-            byClient[key].total += d.amount_cents;
-          }
-        }
-        setTopClients(Object.values(byClient).sort((a, b) => b.total - a.total).slice(0, 5));
-      }).catch(() => {});
-    }
-
-    if (isLogistics) {
-      api.get('/jobs', { params: { page_size: '10' } })
-        .then((r) => setMyJobs(r.data.items || [])).catch(() => {});
-      api.get('/disbursements', { params: { page_size: '10' } })
-        .then((r) => setMyDisbs(r.data.items || [])).catch(() => {});
-    }
-  }, [canSeeFinancial, isLogistics]);
+  const JOB_STATUS_CLASS = {
+    open:     'bg-blue-900/40 text-blue-300 border border-blue-800',
+    released: 'bg-emerald-900/40 text-emerald-300 border border-emerald-800',
+    invoiced: 'bg-amber-900/40 text-amber-300 border border-amber-800',
+    paid:     'bg-emerald-700/60 text-white border border-emerald-600',
+  };
+  const JOB_STATUS_LABEL = { open:'Ouvert', released:'Livré', invoiced:'Facturé', paid:'Payé' };
+  const INV_STATUS_BADGE = {
+    draft:   'bg-zinc-700 text-zinc-300', sent:'bg-blue-900/40 text-blue-300',
+    paid:    'bg-emerald-700/60 text-white', overdue:'bg-red-900/40 text-red-300', cancelled:'bg-zinc-800 text-zinc-500',
+  };
+  const INV_STATUS_LABEL = { draft:'Brouillon', sent:'Envoyée', paid:'Payée', overdue:'En retard', cancelled:'Annulée' };
 
   return (
     <div className="space-y-6">
-      {/* Welcome */}
-      <div>
-        <h1 className="text-2xl font-bold text-[#FAFAFA]">Tableau de bord</h1>
-        <p className="text-sm text-[#A1A1AA] mt-1">
-          Bienvenue, {user?.name} — {ROLE_LABEL[user?.role]}
-        </p>
+      {/* Header + refresh */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[#FAFAFA]">Tableau de bord</h1>
+          <p className="text-sm text-[#A1A1AA] mt-0.5">Bonjour, {user?.name}</p>
+        </div>
+        <p className="text-xs text-[#555555]">Mis à jour à {fmtTime(lastRefresh)}</p>
       </div>
 
-      {/* Admin / Accountant */}
-      {canSeeFinancial && stats && (
-        <>
-          {/* Row 1 — key metrics */}
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-            {invoiceAlerts && (
-              <>
-                <StatCard
-                  title="⚠ Factures en retard"
-                  value={invoiceAlerts.overdue?.count ?? 0}
-                  sub={invoiceAlerts.overdue?.count > 0 ? formatMADShort(invoiceAlerts.overdue.total_amount_cents) : undefined}
-                  color={invoiceAlerts.overdue?.count > 0 ? 'red' : 'default'}
-                  to="/app/factures?overdue_only=1"
-                />
-                <StatCard
-                  title="À encaisser"
-                  value={invoiceAlerts.due_soon?.count > 0 ? `${invoiceAlerts.due_soon.count} proches` : '—'}
-                  color={invoiceAlerts.due_soon?.count > 0 ? 'amber' : 'default'}
-                  to="/app/factures?status=sent"
-                />
-              </>
-            )}
-          </div>
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-            <StatCard
-              title="À valider"
-              value={stats.pending_signature_count}
-              sub={formatMADShort(stats.pending_signature_amount)}
-              color={stats.pending_signature_count > 0 ? 'amber' : 'default'}
-              to="/app/decaissements?status=pending_signature"
-            />
-            <StatCard
-              title="Validés non facturés"
-              value={stats.signed_uninvoiced_count}
-              sub={stats.signed_uninvoiced_count > 0 ? formatMADShort(stats.signed_uninvoiced_amount) : undefined}
-              color="default"
-              to="/app/decaissements?status=signed"
-            />
-            <StatCard
-              title="⚠ Alertes — Non facturés"
-              value={stats.red_flag_count}
-              sub={stats.red_flag_count > 0 ? formatMADShort(stats.red_flag_amount) : undefined}
-              color={stats.red_flag_count > 0 ? 'red' : 'default'}
-              to="/app/decaissements?red_flag=1"
-            />
-            <StatCard
-              title="⚠ Alertes — Reçus manquants"
-              value={stats.receipt_alert_count}
-              sub={stats.receipt_alert_count > 0 ? formatMADShort(stats.receipt_alert_amount) : undefined}
-              color={stats.receipt_alert_count > 0 ? 'amber' : 'default'}
-              to="/app/decaissements"
-            />
-            <StatCard
-              title="Décaissements ce mois"
-              value={formatMADShort(stats.this_month_total)}
-              color="default"
-            />
-          </div>
+      {/* ── Row 1 — Alert cards ── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <AlertCard
+          title="⚠ Alertes — Non facturés"
+          value={stats?.red_flag_count ?? '…'}
+          sub={stats?.red_flag_count > 0 ? formatMADShort(stats.red_flag_amount) : undefined}
+          color={stats?.red_flag_count > 0 ? 'red' : 'default'}
+          to="/app/decaissements?red_flag=1"
+        />
+        <AlertCard
+          title="⌛ Reçus manquants"
+          value={stats?.receipt_alert_count ?? '…'}
+          color={stats?.receipt_alert_count > 0 ? 'amber' : 'default'}
+          to="/app/decaissements"
+        />
+        {isAdmin && (
+          <AlertCard
+            title="📝 En attente de validation"
+            value={stats?.pending_signature_count ?? '…'}
+            sub={stats?.pending_signature_count > 0 ? formatMADShort(stats.pending_signature_amount) : undefined}
+            color={stats?.pending_signature_count > 0 ? 'amber' : 'default'}
+            to="/app/decaissements?status=pending_signature"
+          />
+        )}
+        <AlertCard
+          title="🔴 Factures en retard"
+          value={alerts?.overdue?.count ?? '…'}
+          sub={alerts?.overdue?.count > 0 ? formatMADShort(alerts.overdue.total_amount_cents) : undefined}
+          color={alerts?.overdue?.count > 0 ? 'red' : 'default'}
+          to="/app/factures?overdue_only=1"
+        />
+        <AlertCard
+          title="📋 Dossiers non réclamés"
+          value={unassignedCount}
+          color={unassignedCount > 0 ? 'amber' : 'default'}
+          to="/app/dossiers"
+        />
+      </div>
 
-          {/* Row 2 — Recent signed not invoiced */}
-          {recentSigned.length > 0 && (
-            <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#333333] flex items-center justify-between">
-                <h2 className="text-sm font-semibold text-[#FAFAFA]">Récents — validés non facturés</h2>
-                <Link to="/app/decaissements?status=signed" className="text-xs text-[#60A5FA] hover:underline">
-                  Voir tout →
-                </Link>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-[#333333]">
-                      {['Dossier', 'Client', 'Type', 'Montant', 'Statut', 'Âge'].map((h) => (
-                        <th key={h} className="px-4 py-2 text-left text-xs font-medium text-[#A1A1AA]">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#333333]">
-                    {recentSigned.map((d) => (
-                      <tr key={d.id} onClick={() => setDetailId(d.id)}
-                        className={`cursor-pointer hover:bg-[#2A2A2A] transition-colors ${d.is_red_flag_invoice ? 'border-l-4 border-red-500' : 'border-l-4 border-amber-500'}`}>
-                        <td className="px-4 py-2.5 font-mono text-xs text-[#60A5FA]">{d.job.dossier_number}</td>
-                        <td className="px-4 py-2.5 text-xs text-[#A1A1AA] max-w-[100px] truncate">{d.job.client.name}</td>
-                        <td className="px-4 py-2.5 text-xs text-[#FAFAFA]">{d.type}</td>
-                        <td className="px-4 py-2.5 text-xs font-medium text-right text-[#FAFAFA] whitespace-nowrap">{formatMAD(d.amount_cents)}</td>
-                        <td className="px-4 py-2.5">
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${STATUS_BADGE[d.status] || ''}`}>
-                            {DISBURSEMENT_STATUS_LABEL[d.status]}
-                            {d.is_red_flag_invoice && ' 🔴'}
-                          </span>
-                        </td>
-                        <td className={`px-4 py-2.5 text-xs ${d.is_red_flag ? 'text-red-400 font-medium' : 'text-amber-400'}`}>
-                          {d.days_since_signed != null ? `${d.days_since_signed}j` : '—'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+      {/* ── Row 2 — Financial pulse ── */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <AlertCard
+          title="💰 Encaissé ce mois"
+          value={formatMADShort(paidThisMonth)}
+          color={paidThisMonth > 0 ? 'green' : 'default'}
+        />
+        <AlertCard
+          title="📤 À encaisser (en cours)"
+          value={formatMADShort(agedAR?.total_outstanding_cents ?? 0)}
+          color={agedAR?.total_outstanding_cents > 0 ? 'amber' : 'default'}
+          to="/app/factures?status=sent"
+        />
+        <AlertCard
+          title="📊 Décaissements ce mois"
+          value={formatMADShort(stats?.this_month_total ?? 0)}
+          color="default"
+        />
+      </div>
+
+      {/* ── Row 3 — Aged receivables bar ── */}
+      <div className="bg-[#242424] border border-[#333333] rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-sm font-semibold text-[#FAFAFA]">Créances par ancienneté</h2>
+          {agedAR && (
+            <span className="text-xs text-[#A1A1AA]">
+              Total : <span className="text-[#FAFAFA] font-medium">{formatMAD(agedAR.total_outstanding_cents)}</span>
+              {agedAR.total_overdue_cents > 0 && (
+                <span className="text-red-400 ml-2">dont {formatMAD(agedAR.total_overdue_cents)} en retard</span>
+              )}
+            </span>
           )}
+        </div>
+        {agedAR
+          ? <AgedBar buckets={agedAR.buckets} total={agedAR.total_outstanding_cents} />
+          : <div className="h-7 rounded-md bg-[#333333] animate-pulse" />}
+      </div>
 
-          {/* Row 3 — Top clients with outstanding */}
-          {topClients.length > 0 && (
-            <div className="bg-[#242424] border border-[#333333] rounded-xl p-5">
-              <h2 className="text-sm font-semibold text-[#FAFAFA] mb-4">Top 5 clients — montants non facturés</h2>
-              <div className="space-y-3">
-                {topClients.map((c, i) => (
-                  <div key={c.name} className="flex items-center gap-3">
-                    <span className="text-xs text-[#555555] w-4">{i + 1}</span>
-                    <span className="flex-1 text-sm text-[#FAFAFA] truncate">{c.name}</span>
-                    <span className="text-sm font-medium text-amber-300">{formatMAD(c.total)}</span>
-                  </div>
+      {/* ── Row 4 — Top clients to follow up ── */}
+      {topClientsToRelance.length > 0 && (
+        <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#333333]">
+            <h2 className="text-sm font-semibold text-[#FAFAFA]">Top clients à relancer</h2>
+          </div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-[#333333]">
+                {['Client', 'Total dû', 'Dont en retard', '>90j'].map((h) => (
+                  <th key={h} className="px-4 py-2 text-left text-xs font-medium text-[#A1A1AA]">{h}</th>
                 ))}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Loading state */}
-      {canSeeFinancial && !stats && (
-        <div className="rounded-xl border border-dashed border-[#333333] bg-[#242424] py-16 text-center text-[#A1A1AA]">
-          <p className="text-sm">Chargement…</p>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-[#333333]">
+              {topClientsToRelance.map((c) => (
+                <tr key={c.client_id} className="hover:bg-[#2A2A2A] cursor-pointer transition-colors"
+                  onClick={() => window.location.href = `/app/clients/${c.client_id}`}>
+                  <td className="px-4 py-2.5 text-sm font-medium text-[#60A5FA] hover:underline">{c.client_name}</td>
+                  <td className="px-4 py-2.5 text-sm font-mono text-[#FAFAFA]">{formatMADShort(c.total_cents)}</td>
+                  <td className="px-4 py-2.5 text-sm font-mono text-amber-300">
+                    {formatMADShort((c['1_30_cents'] || 0) + (c['31_60_cents'] || 0) + (c['61_90_cents'] || 0) + (c['90_plus_cents'] || 0))}
+                  </td>
+                  <td className="px-4 py-2.5 text-sm font-mono text-red-400">
+                    {c['90_plus_cents'] > 0 ? formatMADShort(c['90_plus_cents']) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {/* Logistics view */}
-      {isLogistics && (
-        <div className="space-y-5">
-          {myJobs.length > 0 && (
-            <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#333333]">
-                <h2 className="text-sm font-semibold text-[#FAFAFA]">Mes dossiers</h2>
-              </div>
-              <div className="divide-y divide-[#333333]">
-                {myJobs.map((j) => (
+      {/* ── Row 5 — Recent jobs + recent invoices ── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Recent jobs */}
+        <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#333333] flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-[#FAFAFA]">Dossiers récents</h2>
+            <Link to="/app/dossiers" className="text-xs text-[#60A5FA] hover:underline">Voir tout →</Link>
+          </div>
+          {recentJobs.length === 0
+            ? <p className="px-5 py-8 text-xs text-[#A1A1AA] text-center">Aucun dossier.</p>
+            : <div className="divide-y divide-[#333333]">
+                {recentJobs.map((j) => (
                   <Link key={j.id} to={`/app/dossiers/${j.id}`}
                     className="flex items-center justify-between px-5 py-3 hover:bg-[#2A2A2A] transition-colors">
-                    <span className="font-mono text-sm text-[#60A5FA]">{j.dossier_number}</span>
-                    <span className="text-xs text-[#A1A1AA]">{j.client.name}</span>
+                    <div>
+                      <span className="font-mono text-xs text-[#60A5FA]">{j.dossier_number}</span>
+                      <span className="text-xs text-[#A1A1AA] ml-2 max-w-[120px] truncate inline-block align-bottom">{j.client?.name}</span>
+                    </div>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${JOB_STATUS_CLASS[j.status] || 'bg-zinc-700 text-zinc-300'}`}>
+                      {JOB_STATUS_LABEL[j.status] || j.status}
+                    </span>
                   </Link>
                 ))}
               </div>
-            </div>
-          )}
+          }
+        </div>
 
-          {myDisbs.length > 0 && (
-            <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
-              <div className="px-5 py-4 border-b border-[#333333]">
-                <h2 className="text-sm font-semibold text-[#FAFAFA]">Mes décaissements</h2>
-              </div>
-              <div className="divide-y divide-[#333333]">
-                {myDisbs.map((d) => (
-                  <button key={d.id} type="button" onClick={() => setDetailId(d.id)}
-                    className="w-full flex items-center justify-between px-5 py-3 hover:bg-[#2A2A2A] transition-colors text-left">
+        {/* Recent invoices */}
+        <div className="bg-[#242424] border border-[#333333] rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#333333] flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-[#FAFAFA]">Factures récentes</h2>
+            <Link to="/app/factures" className="text-xs text-[#60A5FA] hover:underline">Voir tout →</Link>
+          </div>
+          {recentInvoices.length === 0
+            ? <p className="px-5 py-8 text-xs text-[#A1A1AA] text-center">Aucune facture.</p>
+            : <div className="divide-y divide-[#333333]">
+                {recentInvoices.map((inv) => (
+                  <Link key={inv.id} to={`/app/factures/${inv.id}`}
+                    className="flex items-center justify-between px-5 py-3 hover:bg-[#2A2A2A] transition-colors">
                     <div>
-                      <span className="text-sm text-[#FAFAFA]">{d.type}</span>
-                      <span className="text-xs text-[#A1A1AA] ml-2">{d.job.dossier_number}</span>
+                      <span className="font-mono text-xs text-[#60A5FA]">{inv.facture_number}</span>
+                      <span className="text-xs text-[#A1A1AA] ml-2 max-w-[100px] truncate inline-block align-bottom">{inv.client?.name}</span>
                     </div>
-                    <span className="text-sm font-medium text-[#FAFAFA]">{formatMAD(d.amount_cents)}</span>
-                  </button>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono text-[#FAFAFA]">{formatMADShort(inv.total_ttc_cents)}</span>
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium ${INV_STATUS_BADGE[inv.status] || ''}`}>
+                        {INV_STATUS_LABEL[inv.status] || inv.status}
+                      </span>
+                    </div>
+                  </Link>
                 ))}
               </div>
-            </div>
-          )}
-
-          {myJobs.length === 0 && myDisbs.length === 0 && (
-            <div className="rounded-xl border border-dashed border-[#333333] bg-[#242424] py-16 text-center text-[#A1A1AA]">
-              <p className="text-sm">Aucune activité récente.</p>
-            </div>
-          )}
+          }
         </div>
-      )}
+      </div>
 
       {detailId && (
-        <DisbursementDetailModal
-          disbursementId={detailId}
-          onClose={() => setDetailId(null)}
-          onUpdated={refreshStats}
-        />
+        <DisbursementDetailModal disbursementId={detailId} onClose={() => setDetailId(null)} onUpdated={loadAll} />
       )}
     </div>
   );

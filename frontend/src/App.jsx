@@ -9,11 +9,14 @@ import ChangePasswordPage from './pages/ChangePasswordPage';
 import ClientsPage from './pages/ClientsPage';
 import JobsListPage from './pages/JobsListPage';
 import JobDetailPage from './pages/JobDetailPage';
-import PlaceholderPage from './pages/PlaceholderPage';
 import DisbursementsListPage from './pages/DisbursementsListPage';
 import InvoicesListPage from './pages/InvoicesListPage';
 import InvoiceDetailPage from './pages/InvoiceDetailPage';
 import CreateInvoicePage from './pages/CreateInvoicePage';
+import ClientDetailPage from './pages/ClientDetailPage';
+import AuditLogPage from './pages/AuditLogPage';
+import SettingsPage from './pages/SettingsPage';
+import CommisAgentsPage from './pages/CommisAgentsPage';
 
 function RootRedirect() {
   const { user, loading } = useAuth();
@@ -44,6 +47,10 @@ export default function App() {
               <ProtectedRoute roles={['admin', 'accountant']}><ChangePasswordPage /></ProtectedRoute>
             } />
             <Route path="clients" element={<ClientsPage />} />
+            <Route path="commis" element={
+              <ProtectedRoute roles={['admin', 'accountant']}><CommisAgentsPage /></ProtectedRoute>
+            } />
+            <Route path="clients/:id" element={<ClientDetailPage />} />
             <Route path="dossiers" element={<JobsListPage />} />
             <Route path="dossiers/:id" element={<JobDetailPage />} />
             <Route path="decaissements" element={<DisbursementsListPage />} />
@@ -53,7 +60,10 @@ export default function App() {
             } />
             <Route path="factures/:id" element={<InvoiceDetailPage />} />
             <Route path="audit" element={
-              <ProtectedRoute roles={['admin']}><PlaceholderPage title="Journal d'audit" /></ProtectedRoute>
+              <ProtectedRoute roles={['admin']}><AuditLogPage /></ProtectedRoute>
+            } />
+            <Route path="parametres" element={
+              <ProtectedRoute roles={['admin']}><SettingsPage /></ProtectedRoute>
             } />
             <Route path="*" element={
               <div className="py-16 text-center text-[#A1A1AA]">Page introuvable (404)</div>

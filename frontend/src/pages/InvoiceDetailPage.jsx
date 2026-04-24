@@ -204,7 +204,15 @@ export default function InvoiceDetailPage() {
           <InfoField label="Date d'émission" value={formatDate(inv.issue_date)} />
           <InfoField label="Échéance" value={formatDate(inv.due_date)} highlight={isOverdue} />
           <InfoField label="Dossier" value={inv.job.dossier_number} />
-          <InfoField label="Client" value={inv.client.name} />
+          <div>
+            <dt className="text-xs text-[#A1A1AA] uppercase tracking-wide mb-0.5">Client</dt>
+            <dd className="text-sm text-[#FAFAFA] flex items-center gap-2">
+              {inv.client.name}
+              <Link to={`/app/clients/${inv.client.id}`} className="text-xs text-[#60A5FA] hover:underline">
+                Voir relevé →
+              </Link>
+            </dd>
+          </div>
           <InfoField label="Créé le" value={formatDateTime(inv.created_at)} />
           {isPaid && <InfoField label="Paiement reçu le" value={formatDate(inv.payment_date)} />}
           {isPaid && <InfoField label="Moyen de paiement" value={inv.payment_method} />}

@@ -1,0 +1,7 @@
+node_modules/
+data/badr_transit.db
+data/receipts/
+data/invoices/
+data/backups/
+logs/
+.env

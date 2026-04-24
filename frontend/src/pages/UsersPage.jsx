@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import toast from 'react-hot-toast';
 import api from '../api';
 
-const ROLE_LABEL = { admin: 'Administrateur', accountant: 'Comptable', logistics: 'Agent logistique' };
+const ROLE_LABEL = { admin: 'Administrateur', accountant: 'Comptable', logistics: 'Déclarant' };
 const ROLE_OPTIONS = [
   { value: 'admin', label: 'Administrateur' },
   { value: 'accountant', label: 'Comptable' },
-  { value: 'logistics', label: 'Agent logistique' },
+  { value: 'logistics', label: 'Déclarant' },
 ];
 
 const EMPTY_FORM = { name: '', role: 'admin', username: '', password: '', pin: '', active: 1 };

@@ -4,7 +4,7 @@ import { useAuth } from '../auth/AuthContext';
 import api from '../api';
 import toast from 'react-hot-toast';
 
-const ROLE_LABEL = { admin: 'Administrateur', accountant: 'Comptable', logistics: 'Agent logistique' };
+const ROLE_LABEL = { admin: 'Administrateur', accountant: 'Comptable', logistics: 'Déclarant' };
 
 function RedDot() {
   return <span className="inline-block w-2 h-2 rounded-full bg-red-500 ml-1.5 flex-shrink-0" />;
@@ -70,15 +70,18 @@ export default function Shell() {
     { to: '/app', label: 'Tableau de bord', dot: badges.pending > 0 },
     { to: '/app/dossiers', label: 'Dossiers' },
     { to: '/app/clients', label: 'Clients' },
+    { to: '/app/commis', label: 'Commis' },
     { to: '/app/decaissements', label: 'Décaissements', dot: badges.redFlags > 0 || badges.receiptAlerts > 0 },
     { to: '/app/factures', label: 'Factures', dot: badges.overdueInvoices > 0 },
     { to: '/app/utilisateurs', label: 'Utilisateurs' },
     { to: '/app/audit', label: "Journal d'audit" },
+    { to: '/app/parametres', label: 'Paramètres' },
   ];
   const accountantNav = [
     { to: '/app', label: 'Tableau de bord' },
     { to: '/app/dossiers', label: 'Dossiers' },
     { to: '/app/clients', label: 'Clients' },
+    { to: '/app/commis', label: 'Commis' },
     { to: '/app/decaissements', label: 'Décaissements', dot: badges.redFlags > 0 || badges.receiptAlerts > 0 },
     { to: '/app/factures', label: 'Factures', dot: badges.overdueInvoices > 0 },
   ];
